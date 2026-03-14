@@ -46,27 +46,32 @@ std::vector<std::pair<std::string, int>> active_families(const TagConfig& cfg)
     return out;
 }
 
-bool detect_tag(const cv::Mat& gray, const TagConfig& cfg, Detection& detection)
+bool detect_tag(const cv::Mat &gray, const TagConfig &cfg, Detection &detection)
 {
     const auto families = active_families(cfg);
-    for (const auto& [name, dict_id] : families)
+
+    for (const auto &[name, dict_id] : families)
     {
-        auto dict = cv::aruco::getPredefinedDictionary(dict_id);
-        auto params = cv::aruco::DetectorParameters::create();
+        const auto dict = cv::aruco::getPredefinedDictionary(dict_id);
+        cv::aruco::DetectorParameters params;
+        cv::aruco::ArucoDetector detector(dict, params);
+
         std::vector<int> ids;
         std::vector<std::vector<cv::Point2f>> corners;
-        cv::aruco::detectMarkers(gray, dict, corners, ids, params);
+        detector.detectMarkers(gray, corners, ids);
 
         for (size_t i = 0; i < ids.size(); ++i)
         {
             if (cfg.allowed_id >= 0 && ids[i] != cfg.allowed_id)
                 continue;
+
             detection.family = name;
             detection.id = ids[i];
             detection.corners = corners[i];
             return true;
         }
     }
+
     return false;
 }
 
