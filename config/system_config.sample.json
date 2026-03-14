@@ -28,7 +28,8 @@
   "deploy": {
     "save_trigger_images": true,
     "save_dir": "captures",
-    "draw_debug": true
+    "draw_debug": true,
+    "show_windows": true
   },
   "calibration": {
     "valid": false,
@@ -40,7 +41,7 @@
     "warp_height": 0,
     "H": [0,0,0,0,0,0,0,0,0],
     "tag_corners": [[0,0],[0,0],[0,0],[0,0]],
-    "red_roi": {"x": 0.20, "y": 0.45, "w": 0.12, "h": 0.12},
-    "image_roi": {"x": 0.30, "y": 0.25, "w": 0.40, "h": 0.40}
+    "red_roi": {"x": 0.25, "y": 0.25, "w": 0.25, "h": 0.15},
+    "image_roi": {"x": 0.25, "y": 0.45, "w": 0.5, "h": 0.3}
   }
 }
