@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ARM NEON Optimization flags (Optimized for Raspberry Pi 4/5)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mcpu=cortex-a76 -mtune=cortex-a76 -mfpu=neon-fp-armv8 -mfloat-abi=hard")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mcpu=cortex-a76 -mtune=cortex-a76")
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio calib3d aruco)
 include_directories(include ${OpenCV_INCLUDE_DIRS})
