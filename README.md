@@ -1,108 +1,123 @@
-# Camera + Calibration + Model Test App (Modular C++)
+# Camera Combo Vision App
 
-This version is restructured into a simpler project layout:
+A C++ OpenCV application for a **camera + calibration + model-combination test bench**.
+
+## Modes
+
+- `probe` – scan camera / resolution / fps combinations and generate a health report
+- `calibrate` – detect an AprilTag, compute + lock homography, define ROIs, save config
+- `deploy` – run the saved homography, monitor red ROI, trigger on image ROI capture
+
+## Project structure
 
 ```text
-./src
-./inc
-CMakeLists.txt
-README.md
+.
+├── CMakeLists.txt
+├── README.md
+├── config
+│   └── system_config.sample.json
+├── inc
+│   ├── camera.h
+│   ├── calibration.h
+│   ├── config.h
+│   ├── deploy.h
+│   └── homography.h
+└── src
+    ├── calibration.cpp
+    ├── camera.cpp
+    ├── config.cpp
+    ├── deploy.cpp
+    ├── homography.cpp
+    └── main.cpp
 ```
-
-It splits the app into smaller files so the system is easier to read, debug, and extend.
-
-## What each file does
-
-### Core app flow
-- `src/main.cpp` — process entry point
-- `src/app.cpp` — top-level mode dispatch: `probe`, `calibrate`, `deploy`
-- `src/cli.cpp` / `inc/cli.hpp` — command-line parsing and config overrides
-
-### Shared data / config
-- `inc/types.hpp` — all shared structs and state containers
-- `src/config.cpp` / `inc/config.hpp` — JSON load/save for system config
-- `src/utils.cpp` / `inc/utils.hpp` — timestamp, directory creation, string helpers
-- `inc/constants.hpp` — window names and fixed constants
-
-### Camera / probing
-- `src/camera.cpp` / `inc/camera.hpp` — open camera, backend mapping, frame read
-- `src/probe.cpp` / `inc/probe.hpp` — camera index + resolution + fps scan and report export
-
-### Tag + warp
-- `src/tag_detector.cpp` / `inc/tag_detector.hpp` — AprilTag family selection and detection filtering
-- `src/warp.cpp` / `inc/warp.hpp` — homography build, warp, ROI normalization helpers
-
-### Calibration UI
-- `src/roi_selector.cpp` / `inc/roi_selector.hpp` — ROI drawing on warped frame
-- `src/calibration.cpp` / `inc/calibration.hpp` — live calibration loop, lock transform, save ROIs
-
-### Deploy runtime
-- `src/deploy.cpp` / `inc/deploy.hpp` — load calibration, monitor red ROI, crop image ROI on trigger
 
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
+mkdir build
+cd build
+cmake ..
+cmake --build . -j
 ```
 
-Dependencies:
-- OpenCV with `aruco`, `videoio`, `highgui`, `imgproc`, `imgcodecs`
+### Dependencies
+
+- OpenCV **with contrib/aruco AprilTag dictionaries**
 - `nlohmann_json`
+
+On Debian / Ubuntu / Raspberry Pi OS this usually means:
+
+```bash
+sudo apt install libopencv-dev libopencv-contrib-dev nlohmann-json3-dev
+```
 
 ## Run
 
-### 1) Probe cameras
+### Probe
+
 ```bash
-./camera_combo_app probe --config config/system_config.json
+./camera_combo_vision_app probe --config ../config/system_config.sample.json
 ```
 
-This writes JSON and CSV reports into `./reports`.
+### Calibrate
 
-### 2) Calibrate
 ```bash
-./camera_combo_app calibrate --config config/system_config.json
+./camera_combo_vision_app calibrate --config ../config/system_config.sample.json
 ```
 
-Controls:
-- `L` lock current homography
-- `R` draw red ROI on warped view
-- `I` draw image ROI on warped view
-- `S` save config
-- `Q` or `ESC` quit
+### Deploy
 
-### 3) Deploy
 ```bash
-./camera_combo_app deploy --config config/system_config.json
+./camera_combo_vision_app deploy --config ../config/system_config.sample.json
 ```
 
-Deploy behavior:
-- use saved homography
-- check average red ratio in `red_roi`
-- when threshold passes, capture `image_roi`
-- optionally save raw / warped / ROI images
+## Calibration flow
 
-## Notes on structure
+1. Open raw camera stream
+2. App searches for an AprilTag according to config:
+   - `family = auto` or a specific family
+   - `allowed_id = -1` or a specific tag id
+3. When detected, a warped top-view preview is shown
+4. Press:
+   - `L` to lock / unlock the current homography
+   - `R` to select the **red ROI** on the warped image
+   - `I` to select the **image ROI** on the warped image
+   - `S` to save config immediately
+   - `ESC` to exit
+5. ROIs are stored as normalized ratios, not fixed pixels
 
-This is intentionally organized around **responsibility boundaries**:
-- camera IO
-- perception/tag detection
-- geometric transform
-- calibration interaction
-- deployment logic
+## Deploy flow
 
-That separation makes it easier to replace pieces later, for example:
-- swap AprilTag implementation
-- add intrinsic undistortion
-- add threaded capture
-- attach a YOLO stage after `image_roi`
-- add headless deploy mode
+Deploy does **not** redetect the tag. It only:
 
-## Next sensible extension
+1. loads the saved homography
+2. warps each frame
+3. computes mean BGR inside the red ROI
+4. triggers when:
 
-The next clean step is to split deployment again into:
-- `trigger_logic.*`
-- `capture_writer.*`
-- `overlay_debug.*`
+```text
+R > red_threshold
+R > G + red_margin
+R > B + red_margin
+```
 
-Once you tell me what should happen with `image_roi`, that part can slot in without touching the calibration path too much.
+5. applies cooldown so one event does not spam every frame
+6. optionally saves raw / warped / ROI images
+
+## Speed / reliability choices baked in
+
+- shared `open_camera()` path for probe/calibrate/deploy
+- backend is configurable (`V4L2`, `ANY`, `GSTREAMER`, ...)
+- optional MJPG request to reduce USB bandwidth
+- `CAP_PROP_BUFFERSIZE = 1` when backend supports it
+- probe warms up before measuring fps
+- deploy reuses frame buffers and does no tag detection
+- ROI crops are views unless a clone is actually needed for saving
+- homography is saved once, then reused
+- ROI ratios are clamped when reconstructed
+- capture / report folders are auto-created
+
+## Notes
+
+- AprilTag support depends on the OpenCV build. If `DICT_APRILTAG_36h11` is missing, the OpenCV package was likely built without the relevant contrib modules.
+- For Raspberry Pi camera stacks, direct `VideoCapture` behavior depends on the installed backend and pipeline. USB cameras typically work best with `CAP_V4L2`. CSI cameras may need a GStreamer path later.

@@ -4,44 +4,49 @@
     "width": 1280,
     "height": 720,
     "fps": 30,
-    "backend": "ANY",
-    "flip_horizontal": false,
-    "use_mjpg": true,
-    "warmup_frames": 12
+    "backend": 200,
+    "prefer_mjpg": true,
+    "buffer_size": 1,
+    "warmup_frames": 30,
+    "drop_frames_per_read": 0,
+    "flip_horizontal": false
+  },
+  "probe": {
+    "camera_indices": [0, 1, 2, 3],
+    "widths": [640, 1280, 1920],
+    "heights": [480, 720, 1080],
+    "fps_values": [30, 60],
+    "backends": [200, 0],
+    "warmup_frames": 30,
+    "measure_frames": 120,
+    "report_dir": "reports"
   },
   "tag": {
-    "mode": "auto",
-    "family": "AprilTag 36h11",
-    "id": -1
+    "family": "auto",
+    "allowed_id": -1,
+    "tag_size_units": 200.0,
+    "output_padding_units": 20.0,
+    "lock_on_first_detection": false
   },
-  "red": {
-    "hue_low_1": 0,
-    "hue_high_1": 12,
-    "hue_low_2": 170,
-    "hue_high_2": 180,
-    "sat_min": 100,
-    "val_min": 70,
-    "ratio_trigger": 0.18,
-    "pixel_mean_r_min": 90,
-    "cooldown_frames": 20
+  "trigger": {
+    "red_threshold": 180.0,
+    "red_margin": 40.0,
+    "cooldown_ms": 500,
+    "save_raw": true,
+    "save_warped": true,
+    "save_roi": true,
+    "capture_dir": "captures"
   },
-  "deploy": {
-    "save_trigger_images": true,
-    "save_dir": "captures",
-    "draw_debug": true,
-    "show_windows": true
+  "runtime": {
+    "show_ui": true,
+    "headless_deploy": false
   },
   "calibration": {
     "valid": false,
-    "family": "AprilTag 36h11",
-    "id": -1,
-    "source_frame_width": 0,
-    "source_frame_height": 0,
-    "warp_width": 0,
-    "warp_height": 0,
-    "H": [0,0,0,0,0,0,0,0,0],
-    "tag_corners": [[0,0],[0,0],[0,0],[0,0]],
-    "red_roi": {"x": 0.25, "y": 0.25, "w": 0.25, "h": 0.15},
-    "image_roi": {"x": 0.25, "y": 0.45, "w": 0.5, "h": 0.3}
+    "warped_width": 0,
+    "warped_height": 0,
+    "homography": [],
+    "red_roi": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0},
+    "image_roi": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
   }
 }
