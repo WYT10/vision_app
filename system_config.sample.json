@@ -1,0 +1,46 @@
+{
+  "camera": {
+    "index": 0,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "backend": "ANY",
+    "flip_horizontal": false,
+    "use_mjpg": true,
+    "warmup_frames": 12
+  },
+  "tag": {
+    "mode": "auto",
+    "family": "AprilTag 36h11",
+    "id": -1
+  },
+  "red": {
+    "hue_low_1": 0,
+    "hue_high_1": 12,
+    "hue_low_2": 170,
+    "hue_high_2": 180,
+    "sat_min": 100,
+    "val_min": 70,
+    "ratio_trigger": 0.18,
+    "pixel_mean_r_min": 90,
+    "cooldown_frames": 20
+  },
+  "deploy": {
+    "save_trigger_images": true,
+    "save_dir": "captures",
+    "draw_debug": true
+  },
+  "calibration": {
+    "valid": false,
+    "family": "AprilTag 36h11",
+    "id": -1,
+    "source_frame_width": 0,
+    "source_frame_height": 0,
+    "warp_width": 0,
+    "warp_height": 0,
+    "H": [0,0,0,0,0,0,0,0,0],
+    "tag_corners": [[0,0],[0,0],[0,0],[0,0]],
+    "red_roi": {"x": 0.20, "y": 0.45, "w": 0.12, "h": 0.12},
+    "image_roi": {"x": 0.30, "y": 0.25, "w": 0.40, "h": 0.40}
+  }
+}
