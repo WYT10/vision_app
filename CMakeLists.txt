@@ -4,15 +4,19 @@ project(vision_app)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio objdetect calib3d)
+# ARM NEON Optimization flags (Optimized for Raspberry Pi 4/5)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mcpu=cortex-a76 -mtune=cortex-a76 -mfpu=neon-fp-armv8 -mfloat-abi=hard")
 
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio calib3d aruco)
 include_directories(include ${OpenCV_INCLUDE_DIRS})
 
 set(SOURCES
     src/app_main.cpp
     src/app_config.cpp
     src/app_camera.cpp
+    src/app_test.cpp
     src/app_calib.cpp
+    src/app_deploy.cpp
 )
 
 add_executable(vision_app ${SOURCES})

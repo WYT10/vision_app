@@ -2,6 +2,5 @@
 #define APP_CALIB_HPP
 #include "app_config.hpp"
 
-void run_calibration(AppConfig &config);
-
+void run_calib_mode(AppConfig &config);
 #endif
