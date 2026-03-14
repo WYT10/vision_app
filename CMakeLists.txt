@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(camera_combo_vision_app LANGUAGES CXX)
+project(vision_app LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc imgcodecs videoio aruco)
 find_package(nlohmann_json REQUIRED)
 
-add_executable(camera_combo_vision_app
+add_executable(vision_app
     src/main.cpp
     src/config.cpp
     src/camera.cpp
@@ -21,24 +21,24 @@ add_executable(camera_combo_vision_app
     src/homography.cpp
 )
 
-target_include_directories(camera_combo_vision_app PRIVATE
+target_include_directories(vision_app PRIVATE
     inc
     ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(camera_combo_vision_app PRIVATE
+target_link_libraries(vision_app PRIVATE
     ${OpenCV_LIBS}
     nlohmann_json::nlohmann_json
 )
 
 if(MSVC)
-    target_compile_options(camera_combo_vision_app PRIVATE /W4 /permissive-)
+    target_compile_options(vision_app PRIVATE /W4 /permissive-)
 else()
-    target_compile_options(camera_combo_vision_app PRIVATE -O3 -DNDEBUG -Wall -Wextra -Wpedantic)
+    target_compile_options(vision_app PRIVATE -O3 -DNDEBUG -Wall -Wextra -Wpedantic)
 endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
 if(ipo_supported)
-    set_property(TARGET camera_combo_vision_app PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET vision_app PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
