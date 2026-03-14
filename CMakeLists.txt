@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc imgcodecs videoio aruco)
+find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc imgcodecs videoio aruco calib3d)
 find_package(nlohmann_json REQUIRED)
 
 add_executable(vision_app
