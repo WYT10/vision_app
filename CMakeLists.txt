@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(camera_combo_app LANGUAGES CXX)
+project(vision_app LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ option(APP_ENABLE_UI "Enable OpenCV GUI windows" ON)
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc imgcodecs videoio aruco calib3d)
 find_package(nlohmann_json REQUIRED)
 
-add_executable(camera_combo_app
+add_executable(vision_app
     src/main.cpp
     src/config.cpp
     src/camera.cpp
@@ -19,9 +19,9 @@ add_executable(camera_combo_app
     src/deploy.cpp
 )
 
-target_include_directories(camera_combo_app PRIVATE inc)
+target_include_directories(vision_app PRIVATE inc)
 
-target_link_libraries(camera_combo_app PRIVATE
+target_link_libraries(vision_app PRIVATE
     opencv_core
     opencv_highgui
     opencv_imgproc
@@ -33,11 +33,11 @@ target_link_libraries(camera_combo_app PRIVATE
 )
 
 if(APP_ENABLE_UI)
-    target_compile_definitions(camera_combo_app PRIVATE APP_ENABLE_UI=1)
+    target_compile_definitions(vision_app PRIVATE APP_ENABLE_UI=1)
 else()
-    target_compile_definitions(camera_combo_app PRIVATE APP_ENABLE_UI=0)
+    target_compile_definitions(vision_app PRIVATE APP_ENABLE_UI=0)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(camera_combo_app PRIVATE -O3 -DNDEBUG)
+    target_compile_options(vision_app PRIVATE -O3 -DNDEBUG)
 endif()
