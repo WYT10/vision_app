@@ -1,61 +1,49 @@
 {
+  "profile_name": "default",
   "camera": {
+    "probe_report_path": "reports/cam0_v4l2.txt",
     "device_index": 0,
-    "device_path": "",
-    "v4l2_device": "/dev/video0",
-    "backend": "V4L2",
-    "requested_mode": {
-      "width": 320,
-      "height": 240,
-      "fps": 60,
-      "fourcc": "MJPG"
-    },
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "fourcc": "MJPG",
+    "backend": 200,
     "buffer_size": 1,
-    "warmup_frames": 20,
-    "drop_frames_per_read": 0,
     "flip_horizontal": false,
-    "probe_candidates": [
-      { "width": 640, "height": 480, "fps": 60,  "fourcc": "MJPG" },
-      { "width": 320, "height": 240, "fps": 60,  "fourcc": "MJPG" },
-      { "width": 160, "height": 120, "fps": 120, "fourcc": "MJPG" },
-      { "width": 160, "height": 120, "fps": 180, "fourcc": "MJPG" }
-    ]
+    "flip_vertical": false,
+    "actual_width": 0,
+    "actual_height": 0,
+    "actual_fps": 0.0,
+    "actual_fourcc": ""
   },
-  "tag": {
-    "family_mode": "auto",
-    "allowed_family": "",
-    "allowed_id": -1,
-    "tag_size_units": 100.0,
-    "output_padding_units": 10.0,
-    "lock_on_first_detection": false
+  "probe": {
+    "csv_path": "reports/cam0_probe.csv",
+    "json_path": "reports/cam0_probe.json"
   },
-  "trigger": {
-    "red_threshold": 180.0,
-    "red_margin": 40.0,
+  "remap": {
+    "tag_family": "36h11",
+    "tag_orientation": "0123",
+    "homography_matrix": [1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0],
+    "transformed_width": 0,
+    "transformed_height": 0,
+    "calibrated": false
+  },
+  "roi": {
+    "red_roi": {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.12},
+    "red_threshold": 180,
+    "red_margin": 40,
     "cooldown_ms": 500,
-    "save_raw": true,
-    "save_warped": true,
-    "save_roi": true,
-    "capture_dir": "captures"
+    "target_roi": {"x": 0.30, "y": 0.30, "w": 0.35, "h": 0.25}
   },
-  "runtime": {
-    "show_ui": true,
-    "headless_deploy": false,
-    "probe_measure_frames": 120,
-    "report_dir": "reports"
+  "model": {
+    "backend": "none",
+    "model_path": "models/model.onnx",
+    "confidence_threshold": 0.25
   },
-  "calibration": {
-    "valid": false,
-    "camera_mode_used": {
-      "width": 0,
-      "height": 0,
-      "fps": 0,
-      "fourcc": "MJPG"
-    },
-    "warped_width": 0,
-    "warped_height": 0,
-    "homography": [],
-    "red_roi_ratio": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
-    "image_roi_ratio": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }
+  "debug": {
+    "enable_ui": true,
+    "manual_warp_preview": true,
+    "save_captures": false,
+    "verbose_log": true
   }
 }

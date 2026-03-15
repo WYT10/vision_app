@@ -1,360 +1,214 @@
 #include "calibration.h"
-
-#include "camera.h"
-#include "homography.h"
-
-#include <algorithm>
-#include <cctype>
-#include <cmath>
 #include <iostream>
-#include <map>
-#include <opencv2/aruco.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
-#include <utility>
-#include <vector>
 
-namespace
-{
-/*
-------------------------------------------------------------------------------
-Detection container
-------------------------------------------------------------------------------
-Output of the internal AprilTag finder. This is intentionally local to the
-calibration translation unit because deploy does not redetect tags.
-------------------------------------------------------------------------------
-*/
-struct Detection
-{
-    std::string family;
-    int id = -1;
-    std::vector<cv::Point2f> corners;
-};
+namespace app {
 
-std::map<std::string, int> make_family_map()
-{
-    return {
-        {"16H5", cv::aruco::DICT_APRILTAG_16h5},
-        {"25H9", cv::aruco::DICT_APRILTAG_25h9},
-        {"36H10", cv::aruco::DICT_APRILTAG_36h10},
-        {"36H11", cv::aruco::DICT_APRILTAG_36h11}
-    };
+CalibrationSession::CalibrationSession(AppConfig& cfg, const std::string& config_path)
+    : cfg_(cfg), config_path_(config_path), homography_(cfg.remap) {}
+
+void CalibrationSession::mouseThunk(int event, int x, int y, int flags, void* userdata) {
+    if (auto* self = static_cast<CalibrationSession*>(userdata)) self->handleMouse(event, x, y, flags);
 }
 
-std::vector<std::pair<std::string, int>> active_families(const TagConfig& cfg)
-{
-    const auto fams = make_family_map();
-    std::vector<std::pair<std::string, int>> out;
-
-    if (cfg.family_mode == "auto")
-    {
-        for (const auto& kv : fams)
-            out.push_back(kv);
-        return out;
+bool CalibrationSession::init(std::string* err) {
+    if (!camera_.open(cfg_.camera, err)) return false;
+#if APP_ENABLE_UI
+    if (cfg_.debug.enable_ui) {
+        cv::namedWindow("raw", cv::WINDOW_NORMAL);
+        cv::namedWindow("warp_preview", cv::WINDOW_NORMAL);
+        cv::setMouseCallback("warp_preview", mouseThunk, this);
     }
-
-    std::string key = cfg.allowed_family;
-    for (char& ch : key)
-        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-
-    auto it = fams.find(key);
-    if (it != fams.end())
-        out.push_back(*it);
-    return out;
-}
-
-/*
-------------------------------------------------------------------------------
-detect_tag
-------------------------------------------------------------------------------
-Input
-    gray : grayscale frame
-    cfg  : tag family / ID policy
-
-Output
-    detection : first accepted detection
-
-Return
-    true when a matching AprilTag is found.
-------------------------------------------------------------------------------
-*/
-bool detect_tag(const cv::Mat& gray, const TagConfig& cfg, Detection& detection)
-{
-    const auto families = active_families(cfg);
-    for (const auto& [name, dict_id] : families)
-    {
-        const auto dict = cv::aruco::getPredefinedDictionary(dict_id);
-        cv::aruco::DetectorParameters params;
-        cv::aruco::ArucoDetector detector(dict, params);
-
-        std::vector<int> ids;
-        std::vector<std::vector<cv::Point2f>> corners;
-        detector.detectMarkers(gray, corners, ids);
-
-        for (size_t i = 0; i < ids.size(); ++i)
-        {
-            if (cfg.allowed_id >= 0 && ids[i] != cfg.allowed_id)
-                continue;
-            detection.family = name;
-            detection.id = ids[i];
-            detection.corners = corners[i];
-            return true;
-        }
-    }
-    return false;
-}
-
-void draw_detection_overlay(cv::Mat& frame, const Detection& det)
-{
-    if (det.corners.size() != 4)
-        return;
-
-    std::vector<std::vector<cv::Point>> poly(1);
-    for (const auto& p : det.corners)
-        poly[0].push_back(cv::Point(static_cast<int>(std::round(p.x)), static_cast<int>(std::round(p.y))));
-
-    cv::polylines(frame, poly, true, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
-    cv::putText(frame,
-                det.family + " id=" + std::to_string(det.id),
-                poly[0][0],
-                cv::FONT_HERSHEY_SIMPLEX,
-                0.6,
-                cv::Scalar(0, 255, 0),
-                2,
-                cv::LINE_AA);
-}
-
-void draw_roi(cv::Mat& image, const cv::Rect& rect, const cv::Scalar& color, const std::string& label)
-{
-    if (rect.width <= 0 || rect.height <= 0)
-        return;
-
-    cv::rectangle(image, rect, color, 2);
-    cv::putText(image,
-                label,
-                cv::Point(rect.x, std::max(18, rect.y - 4)),
-                cv::FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv::LINE_AA);
-}
-
-bool select_roi_from_window(const std::string& window_name, const cv::Mat& image, cv::Rect& out_rect)
-{
-    const cv::Rect2d r = cv::selectROI(window_name, image, false, false);
-    cv::Rect rect(static_cast<int>(std::round(r.x)),
-                  static_cast<int>(std::round(r.y)),
-                  static_cast<int>(std::round(r.width)),
-                  static_cast<int>(std::round(r.height)));
-    if (rect.width <= 0 || rect.height <= 0)
-        return false;
-    out_rect = rect;
+#endif
     return true;
 }
 
-void print_mode_summary(const char* prefix, const CameraMode& mode)
-{
-    std::cout << prefix << mode.width << 'x' << mode.height << '@' << mode.fps
-              << ' ' << normalize_fourcc_string(mode.fourcc) << '\n';
-}
-}
-
-bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string* error)
-{
-    cv::VideoCapture cap;
-    CameraMode actual_mode;
-    if (!open_camera(cap, cfg.camera, &actual_mode, error))
-        return false;
-
-    std::cout << "[calibration] camera opened\n";
-    print_mode_summary("[calibration] actual mode: ", actual_mode);
-
-    const std::string raw_window = "raw";
-    const std::string warp_window = "warped";
-    if (cfg.runtime.show_ui)
-    {
-        cv::namedWindow(raw_window, cv::WINDOW_NORMAL);
-        cv::namedWindow(warp_window, cv::WINDOW_NORMAL);
+bool CalibrationSession::updateLiveFrame(std::string* err) {
+    if (!camera_.read(live_frame_, err)) return false;
+    live_frame_display_ = live_frame_.clone();
+    live_det_ = {};
+    homography_.detectTag(live_frame_, live_det_, err);
+    if (live_det_.found) {
+        std::vector<std::vector<cv::Point2f>> corners{live_det_.corners};
+        std::vector<int> ids{live_det_.id};
+        cv::aruco::drawDetectedMarkers(live_frame_display_, corners, ids);
     }
+    return true;
+}
 
-    bool locked = false;
-    cv::Mat preview_H;
-    cv::Size preview_size;
-    cv::Mat locked_H;
-    cv::Size locked_size;
-    cv::Rect red_rect;
-    cv::Rect image_rect;
-
-    cv::Mat frame;
-    cv::Mat gray;
+bool CalibrationSession::updateWarpPreview(std::string* err) {
+    candidate_preview_.release();
+    live_candidate_H_.release();
+    live_candidate_size_ = {};
+    if (!live_det_.found) {
+        if (err) *err = "tag not found";
+        return false;
+    }
+    if (!homography_.calculateHomography(live_det_, live_candidate_H_, err)) return false;
+    if (!homography_.computeWarpedSize(live_frame_, live_candidate_H_, live_candidate_size_, err)) return false;
     cv::Mat warped;
+    if (!homography_.warpImage(live_frame_, live_candidate_H_, live_candidate_size_, warped, err)) return false;
+    candidate_preview_ = HomographyEngine::makePreview255(warped);
+    state_ = CalibrationState::WarpPreviewReady;
+    return true;
+}
 
-    while (true)
-    {
-        if (!read_frame(cap, frame, cfg.camera.drop_frames_per_read))
-        {
-            if (error) *error = "Calibration read failed";
-            return false;
+bool CalibrationSession::lockCurrentSolution(std::string* err) {
+    if (live_frame_.empty() || !live_det_.found || live_candidate_H_.empty() || !HomographyEngine::validateWarpSize(live_candidate_size_)) {
+        if (err) *err = "no valid candidate solution to lock";
+        return false;
+    }
+    locked_frame_ = live_frame_.clone();
+    locked_det_ = live_det_;
+    locked_H_ = live_candidate_H_.clone();
+    if (!homography_.warpImage(locked_frame_, locked_H_, live_candidate_size_, locked_warped_, err)) return false;
+    locked_warped_display_ = locked_warped_.clone();
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) cfg_.remap.homography_matrix[r * 3 + c] = locked_H_.at<double>(r, c);
+    cfg_.remap.transformed_width = locked_warped_.cols;
+    cfg_.remap.transformed_height = locked_warped_.rows;
+    cfg_.remap.calibrated = true;
+    state_ = CalibrationState::Locked;
+    return true;
+}
+
+void CalibrationSession::updateRedRoiTelemetry() {
+    if (locked_warped_.empty()) return;
+    if (state_ == CalibrationState::EditRedRoi || state_ == CalibrationState::Locked) {
+        cv::Rect r = active_rect_px_;
+        if (r.width <= 0 || r.height <= 0) {
+            r = HomographyEngine::roiFromRatio(cfg_.roi.red_roi, locked_warped_.size());
         }
+        r &= cv::Rect(0, 0, locked_warped_.cols, locked_warped_.rows);
+        if (r.width > 0 && r.height > 0) {
+            const cv::Scalar mean_bgr = cv::mean(locked_warped_(r));
+            red_roi_live_value_ = mean_bgr[2];
+        }
+    }
+}
 
-        if (cfg.camera.flip_horizontal)
-            cv::flip(frame, frame, 1);
+void CalibrationSession::drawUi() {
+#if APP_ENABLE_UI
+    if (!cfg_.debug.enable_ui) return;
 
-        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-        Detection det;
-        const bool found = detect_tag(gray, cfg.tag, det);
+    if (!live_frame_display_.empty()) {
+        drawStatusText(live_frame_display_, std::string("state: ") + (live_det_.found ? "tag found" : "no tag"), 0, live_det_.found ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255));
+        drawStatusText(live_frame_display_, "Enter=preview  L=lock  1=red roi  2=target roi  S=save  Esc=quit", 1, {255,255,0});
+        cv::imshow("raw", live_frame_display_);
+    }
 
-        cv::Mat raw_vis = frame;
-        if (cfg.runtime.show_ui)
-            raw_vis = frame.clone();
-        if (found && cfg.runtime.show_ui)
-            draw_detection_overlay(raw_vis, det);
+    cv::Mat preview;
+    if (!locked_warped_display_.empty()) preview = locked_warped_display_.clone();
+    else if (!candidate_preview_.empty()) preview = candidate_preview_.clone();
 
-        bool preview_ok = false;
-        if (!locked && found)
-        {
-            preview_ok = compute_homography_from_tag(
-                det.corners,
-                frame.size(),
-                cfg.tag.tag_size_units,
-                cfg.tag.output_padding_units,
-                preview_H,
-                preview_size);
+    if (!preview.empty()) {
+        if (!locked_warped_display_.empty()) {
+            cv::Rect red = HomographyEngine::roiFromRatio(cfg_.roi.red_roi, locked_warped_display_.size());
+            cv::Rect tgt = HomographyEngine::roiFromRatio(cfg_.roi.target_roi, locked_warped_display_.size());
+            cv::rectangle(preview, red, {0,0,255}, 2);
+            cv::rectangle(preview, tgt, {255,255,0}, 2);
+            if (active_rect_px_.width > 0 && active_rect_px_.height > 0) cv::rectangle(preview, active_rect_px_, {0,255,0}, 2);
+            updateRedRoiTelemetry();
+            drawStatusText(preview, "red mean: " + std::to_string(static_cast<int>(red_roi_live_value_)) + " threshold: " + std::to_string(cfg_.roi.red_threshold), 0, {0,255,255});
+        }
+        cv::imshow("warp_preview", preview);
+    }
+#endif
+}
 
-            if (preview_ok && !is_safe_warp_size(preview_size))
-            {
-                std::cout << "[calibration] rejected unsafe warp size "
-                          << preview_size.width << 'x' << preview_size.height << "\n";
-                preview_ok = false;
-                preview_H.release();
-                preview_size = {};
+void CalibrationSession::handleMouse(int event, int x, int y, int /*flags*/) {
+    if (locked_warped_display_.empty()) return;
+    if (!(state_ == CalibrationState::EditRedRoi || state_ == CalibrationState::EditTargetRoi)) return;
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        dragging_ = true;
+        drag_start_ = {x, y};
+        active_rect_px_ = cv::Rect(x, y, 1, 1);
+    } else if (event == cv::EVENT_MOUSEMOVE && dragging_) {
+        const int x0 = std::min(drag_start_.x, x);
+        const int y0 = std::min(drag_start_.y, y);
+        const int w = std::abs(drag_start_.x - x);
+        const int h = std::abs(drag_start_.y - y);
+        active_rect_px_ = cv::Rect(x0, y0, w, h) & cv::Rect(0, 0, locked_warped_display_.cols, locked_warped_display_.rows);
+    } else if (event == cv::EVENT_LBUTTONUP) {
+        dragging_ = false;
+        active_rect_px_ &= cv::Rect(0, 0, locked_warped_display_.cols, locked_warped_display_.rows);
+        if (active_rect_px_.width > 0 && active_rect_px_.height > 0) {
+            if (state_ == CalibrationState::EditRedRoi) {
+                cfg_.roi.red_roi = HomographyEngine::ratioFromRect(active_rect_px_, locked_warped_display_.size());
+            } else if (state_ == CalibrationState::EditTargetRoi) {
+                cfg_.roi.target_roi = HomographyEngine::ratioFromRect(active_rect_px_, locked_warped_display_.size());
             }
         }
+    }
+}
 
-        if (cfg.tag.lock_on_first_detection && !locked && preview_ok)
-        {
-            locked = true;
-            locked_H = preview_H.clone();
-            locked_size = preview_size;
-            std::cout << "[calibration] auto-locked homography\n";
+bool CalibrationSession::canSave() const {
+    return cfg_.remap.calibrated && cfg_.remap.transformed_width > 0 && cfg_.remap.transformed_height > 0;
+}
+
+bool CalibrationSession::saveProfile(std::string* err) {
+    if (!canSave()) {
+        if (err) *err = "calibration is incomplete";
+        return false;
+    }
+    return ProfileStore::save(config_path_, cfg_, err);
+}
+
+int CalibrationSession::run() {
+    std::string err;
+    if (!init(&err)) {
+        std::cerr << "init failed: " << err << std::endl;
+        return 1;
+    }
+
+    while (true) {
+        if (!updateLiveFrame(&err)) {
+            std::cerr << "camera read failed: " << err << std::endl;
+            return 1;
         }
 
-        const cv::Mat& H_use = locked ? locked_H : preview_H;
-        const cv::Size size_use = locked ? locked_size : preview_size;
-        const bool have_preview = !H_use.empty() && size_use.width > 0 && size_use.height > 0;
-
-        if (have_preview)
-        {
-            if (!warp_frame(frame, warped, H_use, size_use))
-            {
-                if (error) *error = "Warp failed during calibration";
-                return false;
-            }
-
-            if (cfg.runtime.show_ui)
-            {
-                if (red_rect.width > 0 && red_rect.height > 0)
-                    draw_roi(warped, red_rect, cv::Scalar(0, 0, 255), "red_roi");
-                if (image_rect.width > 0 && image_rect.height > 0)
-                    draw_roi(warped, image_rect, cv::Scalar(255, 255, 0), "image_roi");
-            }
+        if (!cfg_.debug.manual_warp_preview && live_det_.found) {
+            std::string preview_err;
+            updateWarpPreview(&preview_err);
         }
 
-        if (!cfg.runtime.show_ui)
-        {
-            if (locked && have_preview)
+        drawUi();
+
+#if APP_ENABLE_UI
+        const int key = cfg_.debug.enable_ui ? cv::waitKey(1) : -1;
+#else
+        const int key = -1;
+#endif
+        if (key == 27) break;
+        if (key == 13 || key == 10) {
+            std::string preview_err;
+            updateWarpPreview(&preview_err);
+        } else if (key == 'l' || key == 'L') {
+            std::string lock_err;
+            if (!lockCurrentSolution(&lock_err)) std::cerr << "lock failed: " << lock_err << std::endl;
+        } else if (key == '1' && !locked_warped_.empty()) {
+            state_ = CalibrationState::EditRedRoi;
+        } else if (key == '2' && !locked_warped_.empty()) {
+            state_ = CalibrationState::EditTargetRoi;
+        } else if (key == 's' || key == 'S') {
+            std::string save_err;
+            if (saveProfile(&save_err)) {
+                std::cout << "saved profile to " << config_path_ << std::endl;
+                state_ = CalibrationState::Done;
                 break;
-            continue;
-        }
-
-        const std::string status = locked ? "LOCKED" : "LIVE";
-        cv::putText(raw_vis,
-                    "[L] lock  [R] red ROI  [I] image ROI  [S] save  [ESC] exit   status=" + status,
-                    cv::Point(10, 24),
-                    cv::FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    cv::Scalar(0, 255, 255),
-                    2,
-                    cv::LINE_AA);
-        cv::imshow(raw_window, raw_vis);
-        if (have_preview)
-            cv::imshow(warp_window, warped);
-
-        const int key = cv::waitKey(1) & 0xFF;
-        if (key == 27)
-            break;
-        if (key == 'l' || key == 'L')
-        {
-            if (preview_ok)
-            {
-                locked = !locked;
-                if (locked)
-                {
-                    locked_H = preview_H.clone();
-                    locked_size = preview_size;
-                    red_rect = {};
-                    image_rect = {};
-                    cfg.calibration.red_roi_ratio = {};
-                    cfg.calibration.image_roi_ratio = {};
-                    std::cout << "[calibration] locked homography at " << locked_size.width << 'x' << locked_size.height << "\n";
-                }
-                else
-                {
-                    std::cout << "[calibration] unlocked homography\n";
-                }
             }
-        }
-        else if (key == 'r' || key == 'R')
-        {
-            if (locked && have_preview)
-            {
-                cv::Mat frozen = warped.clone();
-                if (select_roi_from_window(warp_window, frozen, red_rect))
-                {
-                    cfg.calibration.red_roi_ratio = rect_to_ratio(red_rect, locked_size);
-                    std::cout << "[calibration] red ROI selected\n";
-                }
-            }
-        }
-        else if (key == 'i' || key == 'I')
-        {
-            if (locked && have_preview)
-            {
-                cv::Mat frozen = warped.clone();
-                if (select_roi_from_window(warp_window, frozen, image_rect))
-                {
-                    cfg.calibration.image_roi_ratio = rect_to_ratio(image_rect, locked_size);
-                    std::cout << "[calibration] image ROI selected\n";
-                }
-            }
-        }
-        else if (key == 's' || key == 'S')
-        {
-            if (!locked || locked_H.empty() || !is_valid_ratio_roi(cfg.calibration.red_roi_ratio) || !is_valid_ratio_roi(cfg.calibration.image_roi_ratio))
-            {
-                if (error) *error = "Need locked homography + both ROIs before save";
-                std::cout << "[calibration] save blocked: need locked homography + both ROIs\n";
-                continue;
-            }
-
-            cfg.calibration.valid = true;
-            cfg.calibration.camera_mode_used = actual_mode;
-            cfg.calibration.homography = locked_H.clone();
-            cfg.calibration.warped_width = locked_size.width;
-            cfg.calibration.warped_height = locked_size.height;
-
-            std::string save_error;
-            if (!save_config(config_path, cfg, &save_error))
-            {
-                if (error) *error = save_error;
-                return false;
-            }
-            std::cout << "[calibration] config saved to " << config_path << '\n';
+            std::cerr << "save failed: " << save_err << std::endl;
         }
     }
 
-    if (cfg.runtime.show_ui)
-        cv::destroyAllWindows();
-    return true;
+    camera_.close();
+#if APP_ENABLE_UI
+    if (cfg_.debug.enable_ui) cv::destroyAllWindows();
+#endif
+    return 0;
 }
+
+int runCalibration(AppConfig& cfg, const std::string& config_path) {
+    CalibrationSession s(cfg, config_path);
+    return s.run();
+}
+
+} // namespace app

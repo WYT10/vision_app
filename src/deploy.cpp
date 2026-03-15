@@ -1,188 +1,122 @@
 #include "deploy.h"
-
-#include "camera.h"
-#include "homography.h"
-
-#include <algorithm>
-#include <chrono>
-#include <ctime>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-#include <sstream>
 
-namespace fs = std::filesystem;
+namespace app {
 
-namespace
-{
-std::string make_stamp()
-{
-    using clock = std::chrono::system_clock;
-    const auto now = clock::now();
-    const std::time_t t = clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    return oss.str();
-}
+DeploySession::DeploySession(const AppConfig& cfg) : cfg_(cfg) {}
 
-void draw_roi(cv::Mat& image, const cv::Rect& rect, const cv::Scalar& color, const std::string& label)
-{
-    if (rect.width <= 0 || rect.height <= 0)
-        return;
-    cv::rectangle(image, rect, color, 2);
-    cv::putText(image,
-                label,
-                cv::Point(rect.x, std::max(18, rect.y - 4)),
-                cv::FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv::LINE_AA);
-}
-
-bool is_red_trigger(const cv::Scalar& mean_bgr, const TriggerConfig& cfg)
-{
-    const double b = mean_bgr[0];
-    const double g = mean_bgr[1];
-    const double r = mean_bgr[2];
-    return r > cfg.red_threshold && r > g + cfg.red_margin && r > b + cfg.red_margin;
-}
-}
-
-bool run_deploy(const AppConfig& cfg, std::string* error)
-{
-    if (!cfg.calibration.valid || cfg.calibration.homography.empty() || cfg.calibration.warped_width <= 0 || cfg.calibration.warped_height <= 0)
-    {
-        if (error) *error = "Deploy requires valid calibration data";
+bool DeploySession::validateConfig(std::string* err) const {
+    if (!cfg_.remap.calibrated) {
+        if (err) *err = "profile is not calibrated";
         return false;
     }
-
-    if (!camera_modes_match(cfg.camera.requested_mode, cfg.calibration.camera_mode_used))
-    {
-        if (error) *error = "Requested camera mode does not match calibration camera mode";
+    if (cfg_.remap.transformed_width <= 0 || cfg_.remap.transformed_height <= 0) {
+        if (err) *err = "invalid saved transformed size";
         return false;
     }
-
-    if (!is_valid_ratio_roi(cfg.calibration.red_roi_ratio) || !is_valid_ratio_roi(cfg.calibration.image_roi_ratio))
-    {
-        if (error) *error = "Deploy requires both saved ROIs";
-        return false;
-    }
-
-    cv::VideoCapture cap;
-    CameraMode actual_mode;
-    if (!open_camera(cap, cfg.camera, &actual_mode, error))
-        return false;
-
-    if (!camera_modes_match(actual_mode, cfg.calibration.camera_mode_used))
-    {
-        if (error) *error = "Camera opened in a different actual mode than calibration";
-        return false;
-    }
-
-    const cv::Size warped_size(cfg.calibration.warped_width, cfg.calibration.warped_height);
-    if (!is_safe_warp_size(warped_size))
-    {
-        if (error) *error = "Saved warped output size is unsafe; recalibrate";
-        return false;
-    }
-
-    const cv::Rect red_rect = ratio_to_rect_clamped(cfg.calibration.red_roi_ratio, warped_size);
-    const cv::Rect image_rect = ratio_to_rect_clamped(cfg.calibration.image_roi_ratio, warped_size);
-
-    if (red_rect.width <= 0 || red_rect.height <= 0 || image_rect.width <= 0 || image_rect.height <= 0)
-    {
-        if (error) *error = "Invalid ROI after reconstruction";
-        return false;
-    }
-
-    if (cfg.trigger.save_raw || cfg.trigger.save_warped || cfg.trigger.save_roi)
-        fs::create_directories(cfg.trigger.capture_dir);
-
-    const bool show_ui = cfg.runtime.show_ui && !cfg.runtime.headless_deploy;
-    if (show_ui)
-        cv::namedWindow("deploy", cv::WINDOW_NORMAL);
-
-    cv::Mat frame;
-    cv::Mat warped;
-    auto last_trigger = std::chrono::steady_clock::time_point{};
-
-    std::cout << "[deploy] started\n";
-
-    while (true)
-    {
-        if (!read_frame(cap, frame, cfg.camera.drop_frames_per_read))
-        {
-            if (error) *error = "Deploy read failed";
-            return false;
-        }
-
-        if (cfg.camera.flip_horizontal)
-            cv::flip(frame, frame, 1);
-
-        if (!warp_frame(frame, warped, cfg.calibration.homography, warped_size))
-        {
-            if (error) *error = "Warp failed during deploy";
-            return false;
-        }
-
-        const cv::Mat red_view = warped(red_rect);
-        const cv::Scalar mean_bgr = cv::mean(red_view);
-        const bool trigger_now = is_red_trigger(mean_bgr, cfg.trigger);
-
-        const auto now = std::chrono::steady_clock::now();
-        const bool cooldown_ok = last_trigger.time_since_epoch().count() == 0 ||
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= cfg.trigger.cooldown_ms;
-
-        if (trigger_now && cooldown_ok)
-        {
-            last_trigger = now;
-            const cv::Mat roi_view = warped(image_rect);
-            const std::string stamp = make_stamp();
-            std::cout << "[deploy] trigger fired at " << stamp << '\n';
-            if (cfg.trigger.save_raw)
-                cv::imwrite((fs::path(cfg.trigger.capture_dir) / (stamp + "_raw.png")).string(), frame);
-            if (cfg.trigger.save_warped)
-                cv::imwrite((fs::path(cfg.trigger.capture_dir) / (stamp + "_warped.png")).string(), warped);
-            if (cfg.trigger.save_roi)
-                cv::imwrite((fs::path(cfg.trigger.capture_dir) / (stamp + "_roi.png")).string(), roi_view.clone());
-        }
-
-        if (show_ui)
-        {
-            cv::Mat vis = warped.clone();
-            draw_roi(vis, red_rect, cv::Scalar(0, 0, 255), "red_roi");
-            draw_roi(vis, image_rect, cv::Scalar(255, 255, 0), "image_roi");
-
-            std::ostringstream oss;
-            oss << "B=" << mean_bgr[0] << " G=" << mean_bgr[1] << " R=" << mean_bgr[2]
-                << " trigger=" << (trigger_now ? 1 : 0);
-            cv::putText(vis,
-                        oss.str(),
-                        cv::Point(10, 24),
-                        cv::FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        cv::Scalar(0, 255, 255),
-                        2,
-                        cv::LINE_AA);
-
-            cv::imshow("deploy", vis);
-            const int key = cv::waitKey(1) & 0xFF;
-            if (key == 27)
-                break;
-        }
-    }
-
-    if (show_ui)
-        cv::destroyAllWindows();
     return true;
 }
+
+bool DeploySession::init(std::string* err) {
+    if (!validateConfig(err)) return false;
+    if (!camera_.open(cfg_.camera, err)) return false;
+    H_ = cv::Mat(3, 3, CV_64F);
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) H_.at<double>(r, c) = cfg_.remap.homography_matrix[r * 3 + c];
+    red_roi_px_ = HomographyEngine::roiFromRatio(cfg_.roi.red_roi, {cfg_.remap.transformed_width, cfg_.remap.transformed_height});
+    target_roi_px_ = HomographyEngine::roiFromRatio(cfg_.roi.target_roi, {cfg_.remap.transformed_width, cfg_.remap.transformed_height});
+#if APP_ENABLE_UI
+    if (cfg_.debug.enable_ui) {
+        cv::namedWindow("deploy", cv::WINDOW_NORMAL);
+        cv::namedWindow("deploy_warped", cv::WINDOW_NORMAL);
+    }
+#endif
+    return true;
+}
+
+bool DeploySession::redTriggered(const cv::Mat& warped, double* red_mean_out) const {
+    const cv::Rect safe = red_roi_px_ & cv::Rect(0, 0, warped.cols, warped.rows);
+    if (safe.width <= 0 || safe.height <= 0) return false;
+    const cv::Scalar mean_bgr = cv::mean(warped(safe));
+    if (red_mean_out) *red_mean_out = mean_bgr[2];
+    return mean_bgr[2] > cfg_.roi.red_threshold && mean_bgr[2] > mean_bgr[1] + cfg_.roi.red_margin && mean_bgr[2] > mean_bgr[0] + cfg_.roi.red_margin;
+}
+
+bool DeploySession::forwardInferModel(const cv::Mat& roi) const {
+    (void)roi;
+    return true;
+}
+
+bool DeploySession::processFrame(std::string* err) {
+    if (!camera_.read(frame_, err)) return false;
+    cv::warpPerspective(frame_, warped_, H_, {cfg_.remap.transformed_width, cfg_.remap.transformed_height});
+    if (warped_.empty()) {
+        if (err) *err = "warp failed";
+        return false;
+    }
+
+    double red_mean = 0.0;
+    const bool fired = redTriggered(warped_, &red_mean);
+    const int64_t now = cv::getTickCount();
+    const double elapsed_ms = (now - last_trigger_tick_) * 1000.0 / cv::getTickFrequency();
+    if (fired && elapsed_ms >= cfg_.roi.cooldown_ms) {
+        last_trigger_tick_ = now;
+        const cv::Rect safe = target_roi_px_ & cv::Rect(0, 0, warped_.cols, warped_.rows);
+        if (safe.width > 0 && safe.height > 0) {
+            cv::Mat crop = warped_(safe).clone();
+            forwardInferModel(crop);
+            if (cfg_.debug.save_captures) {
+                std::filesystem::create_directories("captures");
+                cv::imwrite("captures/trigger_raw.png", frame_);
+                cv::imwrite("captures/trigger_warped.png", warped_);
+                cv::imwrite("captures/trigger_crop.png", crop);
+            }
+        }
+    }
+
+#if APP_ENABLE_UI
+    if (cfg_.debug.enable_ui) {
+        cv::Mat frame_show = frame_.clone();
+        cv::Mat warped_show = warped_.clone();
+        cv::rectangle(warped_show, red_roi_px_, {0,0,255}, 2);
+        cv::rectangle(warped_show, target_roi_px_, {255,255,0}, 2);
+        drawStatusText(warped_show, "red mean: " + std::to_string(static_cast<int>(red_mean)), 0, {0,255,255});
+        drawStatusText(warped_show, fired ? "trigger: ON" : "trigger: off", 1, fired ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255));
+        cv::imshow("deploy", frame_show);
+        cv::imshow("deploy_warped", warped_show);
+    }
+#endif
+    return true;
+}
+
+int DeploySession::run() {
+    std::string err;
+    if (!init(&err)) {
+        std::cerr << "deploy init failed: " << err << std::endl;
+        return 1;
+    }
+    while (true) {
+        if (!processFrame(&err)) {
+            std::cerr << "deploy frame failed: " << err << std::endl;
+            break;
+        }
+#if APP_ENABLE_UI
+        const int key = cfg_.debug.enable_ui ? cv::waitKey(1) : -1;
+#else
+        const int key = -1;
+#endif
+        if (key == 27) break;
+    }
+    camera_.close();
+#if APP_ENABLE_UI
+    if (cfg_.debug.enable_ui) cv::destroyAllWindows();
+#endif
+    return 0;
+}
+
+int runDeploy(const AppConfig& cfg) {
+    DeploySession s(cfg);
+    return s.run();
+}
+
+} // namespace app

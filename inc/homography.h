@@ -1,74 +1,39 @@
 #pragma once
-
 #include "config.h"
-#include <opencv2/core.hpp>
+#include <opencv2/aruco.hpp>
+#include <opencv2/opencv.hpp>
 #include <vector>
 
-/*
-==============================================================================
-homography.h
-==============================================================================
-Purpose
-    Shared geometry helpers used by both calibration and deploy.
+namespace app {
 
-Important safety note
-    The warped output size is computed from projected frame bounds. That value
-    must be checked before allocating a warped image, otherwise a bad detection
-    can request a huge output buffer and destabilize a Pi.
-==============================================================================
-*/
+struct TagDetection {
+    bool found = false;
+    int id = -1;
+    std::vector<cv::Point2f> corners;
+};
 
-/*
-------------------------------------------------------------------------------
-compute_homography_from_tag
-------------------------------------------------------------------------------
-Input
-    detected_corners      : 4 tag corners in raw image coordinates
-    input_size            : raw frame size
-    tag_size_units        : size of the square tag plane in arbitrary units
-    output_padding_units  : extra border around the projected full frame
+class HomographyEngine {
+public:
+    explicit HomographyEngine(const RemapConfig& cfg);
 
-Process
-    1. Solve image -> tag plane homography.
-    2. Project full frame corners into the plane.
-    3. Compute bounded output image size.
-    4. Add translation so the warped image starts at (0, 0).
+    bool detectTag(const cv::Mat& frame_bgr, TagDetection& out, std::string* err = nullptr);
+    bool calculateHomography(const TagDetection& det, cv::Mat& H, std::string* err = nullptr);
+    bool computeWarpedSize(const cv::Mat& src_frame, const cv::Mat& H, cv::Size& out_size, std::string* err = nullptr) const;
+    bool warpImage(const cv::Mat& src_frame, const cv::Mat& H, const cv::Size& out_size, cv::Mat& warped, std::string* err = nullptr) const;
 
-Output
-    adjusted_homography   : image -> warped plane transform
-    warped_size           : output image size for warpPerspective
-------------------------------------------------------------------------------
-*/
-bool compute_homography_from_tag(
-    const std::vector<cv::Point2f>& detected_corners,
-    const cv::Size& input_size,
-    double tag_size_units,
-    double output_padding_units,
-    cv::Mat& adjusted_homography,
-    cv::Size& warped_size);
+    static bool validateWarpSize(const cv::Size& size);
+    static cv::Mat makePreview255(const cv::Mat& warped);
+    static cv::Rect roiFromRatio(const RoiRatio& ratio, const cv::Size& size);
+    static RoiRatio ratioFromRect(const cv::Rect& rect, const cv::Size& size);
 
-/* Warp a frame using a precomputed homography. */
-bool warp_frame(
-    const cv::Mat& input,
-    cv::Mat& output,
-    const cv::Mat& homography,
-    const cv::Size& warped_size);
+private:
+    cv::aruco::PredefinedDictionaryType mapTagFamily(const std::string& tag_family) const;
 
-/* Convert between pixel ROIs and normalized ratios. */
-RoiRatio rect_to_ratio(const cv::Rect& rect, const cv::Size& bounds);
-cv::Rect ratio_to_rect_clamped(const RoiRatio& ratio, const cv::Size& bounds);
-bool is_valid_ratio_roi(const RoiRatio& ratio);
+private:
+    RemapConfig cfg_;
+    cv::Ptr<cv::aruco::Dictionary> dict_;
+    cv::aruco::DetectorParameters params_;
+    cv::aruco::ArucoDetector detector_;
+};
 
-/*
-------------------------------------------------------------------------------
-Warp size guard
-------------------------------------------------------------------------------
-Input
-    size : proposed warped image size
-
-Return
-    true only if the warp size is small enough to be considered safe for this
-    application. The limit is conservative on purpose for Raspberry Pi use.
-------------------------------------------------------------------------------
-*/
-bool is_safe_warp_size(const cv::Size& size);
+} // namespace app

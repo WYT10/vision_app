@@ -1,44 +1,43 @@
 cmake_minimum_required(VERSION 3.16)
-project(vision_app LANGUAGES CXX)
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
+project(camera_combo_app LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(APP_ENABLE_UI "Enable OpenCV GUI windows" ON)
+
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc imgcodecs videoio aruco calib3d)
 find_package(nlohmann_json REQUIRED)
 
-add_executable(vision_app
+add_executable(camera_combo_app
     src/main.cpp
     src/config.cpp
     src/camera.cpp
+    src/homography.cpp
     src/calibration.cpp
     src/deploy.cpp
-    src/homography.cpp
 )
 
-target_include_directories(vision_app PRIVATE
-    inc
-    ${OpenCV_INCLUDE_DIRS}
-)
+target_include_directories(camera_combo_app PRIVATE inc)
 
-target_link_libraries(vision_app PRIVATE
-    ${OpenCV_LIBS}
+target_link_libraries(camera_combo_app PRIVATE
+    opencv_core
+    opencv_highgui
+    opencv_imgproc
+    opencv_imgcodecs
+    opencv_videoio
+    opencv_aruco
+    opencv_calib3d
     nlohmann_json::nlohmann_json
 )
 
-if(MSVC)
-    target_compile_options(vision_app PRIVATE /W4 /permissive-)
+if(APP_ENABLE_UI)
+    target_compile_definitions(camera_combo_app PRIVATE APP_ENABLE_UI=1)
 else()
-    target_compile_options(vision_app PRIVATE -O3 -DNDEBUG -Wall -Wextra -Wpedantic)
+    target_compile_definitions(camera_combo_app PRIVATE APP_ENABLE_UI=0)
 endif()
 
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
-if(ipo_supported)
-    set_property(TARGET vision_app PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(camera_combo_app PRIVATE -O3 -DNDEBUG)
 endif()

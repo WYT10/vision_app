@@ -1,416 +1,223 @@
 #include "camera.h"
-
-#include <array>
-#include <chrono>
-#include <cmath>
-#include <cstdio>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <nlohmann/json.hpp>
-#include <opencv2/imgproc.hpp>
 #include <sstream>
 
-using json = nlohmann::json;
-namespace fs = std::filesystem;
+namespace app {
 
-namespace
-{
-/*
-------------------------------------------------------------------------------
-Timestamp helper for probe reports and saved captures.
-------------------------------------------------------------------------------
-*/
-std::string make_timestamp_string()
-{
-    using clock = std::chrono::system_clock;
-    const auto now = clock::now();
-    const std::time_t t = clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    return oss.str();
-}
+CameraDevice::~CameraDevice() { close(); }
 
-/* Convert FOURCC string <-> backend integer code. */
-int fourcc_to_int(const std::string& fourcc)
-{
-    const std::string f = normalize_fourcc_string(fourcc);
-    return cv::VideoWriter::fourcc(f[0], f[1], f[2], f[3]);
-}
-
-std::string int_to_fourcc(double value)
-{
-    const int code = static_cast<int>(value);
-    std::string out(4, ' ');
-    out[0] = static_cast<char>(code & 0xFF);
-    out[1] = static_cast<char>((code >> 8) & 0xFF);
-    out[2] = static_cast<char>((code >> 16) & 0xFF);
-    out[3] = static_cast<char>((code >> 24) & 0xFF);
-    return normalize_fourcc_string(out);
-}
-
-/*
-------------------------------------------------------------------------------
-V4L2 helper selection
-------------------------------------------------------------------------------
-For USB cameras on Linux, the most stable node for the `v4l2-ctl` path is often
-/dev/videoN. If the config already provides a node, use it. Otherwise derive it
-from the camera index.
-------------------------------------------------------------------------------
-*/
-std::string choose_v4l2_device(const CameraConfig& cfg)
-{
-    if (!cfg.v4l2_device.empty())
-        return cfg.v4l2_device;
-
-    if (!cfg.device_path.empty() && cfg.device_path.rfind("/dev/video", 0) == 0)
-        return cfg.device_path;
-
-    if (cfg.device_index >= 0)
-        return "/dev/video" + std::to_string(cfg.device_index);
-
-    return {};
-}
-
-/* Run a shell command and capture stdout+stderr. */
-std::string run_command_capture(const std::string& command)
-{
-    std::array<char, 512> buffer{};
-    std::string output;
-
-    std::string command_with_stderr = command + " 2>&1";
-    FILE* pipe = popen(command_with_stderr.c_str(), "r");
-    if (!pipe)
-        return "[probe] failed to launch command: " + command + "\n";
-
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
-        output += buffer.data();
-
-    const int rc = pclose(pipe);
-    if (rc != 0 && output.empty())
-        output = "[probe] command returned non-zero exit code\n";
-    return output;
-}
-
-/*
-------------------------------------------------------------------------------
-Camera setting application
-------------------------------------------------------------------------------
-Order matters slightly on real hardware. FOURCC first often gives more stable
-results with USB cameras because the driver chooses a transport mode earlier.
-------------------------------------------------------------------------------
-*/
-void apply_camera_settings(cv::VideoCapture& cap, const CameraConfig& cfg, const CameraMode& mode)
-{
-    cap.set(cv::CAP_PROP_FOURCC, fourcc_to_int(mode.fourcc));
-    if (cfg.buffer_size > 0)
-        cap.set(cv::CAP_PROP_BUFFERSIZE, cfg.buffer_size);
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, mode.width);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, mode.height);
-    cap.set(cv::CAP_PROP_FPS, mode.fps);
-}
-
-CameraMode query_actual_mode(cv::VideoCapture& cap)
-{
-    CameraMode out;
-    out.width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-    out.height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-    out.fps = static_cast<int>(std::round(cap.get(cv::CAP_PROP_FPS)));
-    out.fourcc = int_to_fourcc(cap.get(cv::CAP_PROP_FOURCC));
-    return out;
-}
-
-/*
-------------------------------------------------------------------------------
-Single candidate probe
-------------------------------------------------------------------------------
-This is the real-time test layer.
-
-Input
-    camera_cfg     : camera open parameters
-    mode           : requested candidate mode
-    measure_frames : number of frames used for FPS measurement
-
-Output
-    ProbeResult containing requested mode, actual mode, stability, measured FPS,
-    and simple image statistics.
-------------------------------------------------------------------------------
-*/
-ProbeResult probe_one(const CameraConfig& camera_cfg, const CameraMode& mode, int measure_frames)
-{
-    ProbeResult result;
-    result.camera_index = camera_cfg.device_index;
-    result.device_path = camera_cfg.device_path;
-    result.backend = camera_cfg.backend;
-    result.requested_mode = mode;
-
-    cv::VideoCapture cap;
-    const bool use_path = !camera_cfg.device_path.empty();
-    if (use_path)
-        cap.open(camera_cfg.device_path, camera_cfg.backend);
-    else
-        cap.open(camera_cfg.device_index, camera_cfg.backend);
-
-    if (!cap.isOpened())
-    {
-        result.note = "open_failed";
-        return result;
+void ensureParentDir(const std::string& path) {
+    std::filesystem::path p(path);
+    if (!p.parent_path().empty()) {
+        std::filesystem::create_directories(p.parent_path());
     }
-
-    result.opened = true;
-    apply_camera_settings(cap, camera_cfg, mode);
-    result.actual_mode = query_actual_mode(cap);
-
-    cv::Mat frame;
-    for (int i = 0; i < camera_cfg.warmup_frames; ++i)
-    {
-        if (!cap.read(frame) || frame.empty())
-        {
-            result.note = "warmup_read_failed";
-            return result;
-        }
-    }
-
-    int good_frames = 0;
-    double mean_sum = 0.0;
-    double std_sum = 0.0;
-
-    const auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < measure_frames; ++i)
-    {
-        if (!cap.read(frame) || frame.empty())
-        {
-            result.note = "measure_read_failed";
-            break;
-        }
-
-        cv::Mat gray;
-        if (frame.channels() == 3)
-            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-        else
-            gray = frame;
-
-        cv::Scalar mean, stddev;
-        cv::meanStdDev(gray, mean, stddev);
-        mean_sum += mean[0];
-        std_sum += stddev[0];
-        ++good_frames;
-    }
-    const auto t1 = std::chrono::steady_clock::now();
-
-    if (good_frames > 0)
-    {
-        const double seconds = std::chrono::duration<double>(t1 - t0).count();
-        if (seconds > 0.0)
-            result.measured_fps = static_cast<double>(good_frames) / seconds;
-        result.mean_luma = mean_sum / static_cast<double>(good_frames);
-        result.stddev_luma = std_sum / static_cast<double>(good_frames);
-        result.stable = (good_frames == measure_frames);
-    }
-
-    if (result.note.empty())
-    {
-        if (!camera_modes_match(result.actual_mode, mode))
-            result.note = "mode_mismatch";
-        else if (result.stable)
-            result.note = "ok";
-        else
-            result.note = "partial";
-    }
-
-    return result;
 }
 
-json probe_result_to_json(const ProbeResult& r)
-{
-    return {
-        {"camera_index", r.camera_index},
-        {"device_path", r.device_path},
-        {"backend", backend_to_string(r.backend)},
-        {"requested_mode", {
-            {"width", r.requested_mode.width},
-            {"height", r.requested_mode.height},
-            {"fps", r.requested_mode.fps},
-            {"fourcc", r.requested_mode.fourcc}
-        }},
-        {"actual_mode", {
-            {"width", r.actual_mode.width},
-            {"height", r.actual_mode.height},
-            {"fps", r.actual_mode.fps},
-            {"fourcc", r.actual_mode.fourcc}
-        }},
-        {"opened", r.opened},
-        {"stable", r.stable},
-        {"measured_fps", r.measured_fps},
-        {"mean_luma", r.mean_luma},
-        {"stddev_luma", r.stddev_luma},
-        {"note", r.note}
+void drawStatusText(cv::Mat& frame, const std::string& text, int line, const cv::Scalar& color) {
+    const int y = 24 + line * 24;
+    cv::putText(frame, text, cv::Point(12, y), cv::FONT_HERSHEY_SIMPLEX, 0.65, {0,0,0}, 3, cv::LINE_AA);
+    cv::putText(frame, text, cv::Point(12, y), cv::FONT_HERSHEY_SIMPLEX, 0.65, color, 1, cv::LINE_AA);
+}
+
+int CameraDevice::fourccToInt(const std::string& fourcc) {
+    if (fourcc.size() != 4) return 0;
+    return cv::VideoWriter::fourcc(fourcc[0], fourcc[1], fourcc[2], fourcc[3]);
+}
+
+std::string CameraDevice::intToFourcc(int v) {
+    char c[] = {
+        static_cast<char>(v & 255),
+        static_cast<char>((v >> 8) & 255),
+        static_cast<char>((v >> 16) & 255),
+        static_cast<char>((v >> 24) & 255),
+        0
     };
+    return std::string(c);
 }
-}
 
-bool open_camera(cv::VideoCapture& cap, const CameraConfig& cfg, CameraMode* actual_mode, std::string* error)
-{
-    const bool use_path = !cfg.device_path.empty();
-    if (use_path)
-        cap.open(cfg.device_path, cfg.backend);
-    else
-        cap.open(cfg.device_index, cfg.backend);
-
-    if (!cap.isOpened())
-    {
-        if (error)
-        {
-            std::ostringstream oss;
-            oss << "Failed to open camera "
-                << (use_path ? cfg.device_path : std::to_string(cfg.device_index))
-                << " with backend " << backend_to_string(cfg.backend);
-            *error = oss.str();
-        }
-        return false;
+bool CameraDevice::applyRequestedMode(const CameraConfig& cfg) {
+    cap_.set(cv::CAP_PROP_BUFFERSIZE, cfg.buffer_size);
+    if (!cfg.fourcc.empty()) {
+        cap_.set(cv::CAP_PROP_FOURCC, static_cast<double>(fourccToInt(cfg.fourcc)));
     }
-
-    apply_camera_settings(cap, cfg, cfg.requested_mode);
-
-    cv::Mat frame;
-    for (int i = 0; i < cfg.warmup_frames; ++i)
-    {
-        if (!cap.read(frame) || frame.empty())
-        {
-            if (error) *error = "Camera opened but warmup read failed";
-            return false;
-        }
-    }
-
-    if (actual_mode)
-        *actual_mode = query_actual_mode(cap);
+    cap_.set(cv::CAP_PROP_FRAME_WIDTH, cfg.width);
+    cap_.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
+    cap_.set(cv::CAP_PROP_FPS, cfg.fps);
     return true;
 }
 
-bool read_frame(cv::VideoCapture& cap, cv::Mat& frame, int drop_frames_per_read)
-{
-    for (int i = 0; i < drop_frames_per_read; ++i)
-    {
-        if (!cap.grab())
-            return false;
-    }
-    return cap.read(frame) && !frame.empty();
+CameraConfig CameraDevice::readBackActualConfig() const {
+    CameraConfig a = requested_;
+    a.actual_width = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
+    a.actual_height = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
+    a.actual_fps = cap_.get(cv::CAP_PROP_FPS);
+    a.actual_fourcc = intToFourcc(static_cast<int>(cap_.get(cv::CAP_PROP_FOURCC)));
+    return a;
 }
 
-ProbeReport run_camera_probe(const AppConfig& cfg)
-{
-    ProbeReport report;
-    report.v4l2_device = choose_v4l2_device(cfg.camera);
-
-    std::cout << "[probe] backend=" << backend_to_string(cfg.camera.backend)
-              << " camera=" << (cfg.camera.device_path.empty() ? std::to_string(cfg.camera.device_index) : cfg.camera.device_path)
-              << " requested_active_mode=" << cfg.camera.requested_mode.width << 'x' << cfg.camera.requested_mode.height
-              << '@' << cfg.camera.requested_mode.fps << ' ' << normalize_fourcc_string(cfg.camera.requested_mode.fourcc) << '\n';
-
-    if (!report.v4l2_device.empty())
-    {
-        std::cout << "[probe] collecting V4L2 driver enumeration from " << report.v4l2_device << " ...\n";
-        report.list_devices_output = run_command_capture("v4l2-ctl --list-devices");
-        report.list_formats_output = run_command_capture("v4l2-ctl -d " + report.v4l2_device + " --list-formats-ext");
+bool CameraDevice::open(const CameraConfig& cfg, std::string* err) {
+    close();
+    requested_ = cfg;
+    if (!cap_.open(cfg.device_index, cfg.backend)) {
+        if (err) *err = "cannot open camera";
+        return false;
     }
-    else
-    {
-        report.list_devices_output = "[probe] no V4L2 device node available\n";
-        report.list_formats_output = "[probe] no V4L2 device node available\n";
-    }
-
-    report.results.reserve(cfg.camera.probe_candidates.size());
-
-    for (size_t i = 0; i < cfg.camera.probe_candidates.size(); ++i)
-    {
-        const auto& mode = cfg.camera.probe_candidates[i];
-        std::cout << "[probe] [" << (i + 1) << '/' << cfg.camera.probe_candidates.size() << "] testing "
-                  << mode.width << 'x' << mode.height << '@' << mode.fps << ' ' << normalize_fourcc_string(mode.fourcc) << " ... " << std::flush;
-
-        ProbeResult result = probe_one(cfg.camera, mode, cfg.runtime.probe_measure_frames);
-        report.results.push_back(result);
-
-        std::cout << result.note
-                  << " | actual=" << result.actual_mode.width << 'x' << result.actual_mode.height
-                  << '@' << result.actual_mode.fps << ' ' << normalize_fourcc_string(result.actual_mode.fourcc)
-                  << " | measured_fps=" << std::fixed << std::setprecision(2) << result.measured_fps
-                  << '\n';
-    }
-
-    std::cout << "[probe] done\n";
-    return report;
+    applyRequestedMode(cfg);
+    actual_ = readBackActualConfig();
+    open_ = true;
+    return true;
 }
 
-bool write_probe_report(const std::string& report_dir, const ProbeReport& report, std::string* json_path, std::string* csv_path, std::string* txt_path)
-{
-    try
-    {
-        fs::create_directories(report_dir);
-        const std::string stamp = make_timestamp_string();
-        const fs::path json_file = fs::path(report_dir) / ("camera_probe_" + stamp + ".json");
-        const fs::path csv_file = fs::path(report_dir) / ("camera_probe_" + stamp + ".csv");
-        const fs::path txt_file = fs::path(report_dir) / ("camera_probe_" + stamp + "_v4l2.txt");
+void CameraDevice::close() {
+    if (cap_.isOpened()) cap_.release();
+    open_ = false;
+}
 
-        json j;
-        j["v4l2_device"] = report.v4l2_device;
-        j["v4l2_list_devices_raw"] = report.list_devices_output;
-        j["v4l2_list_formats_ext_raw"] = report.list_formats_output;
-        j["probe_results"] = json::array();
-        for (const auto& r : report.results)
-            j["probe_results"].push_back(probe_result_to_json(r));
+bool CameraDevice::isOpen() const { return open_ && cap_.isOpened(); }
 
-        std::ofstream jout(json_file);
-        if (!jout.is_open())
-            return false;
-        jout << j.dump(2) << '\n';
+void CameraDevice::applyConfiguredFlips(cv::Mat& frame) const {
+    if (requested_.flip_horizontal && requested_.flip_vertical) cv::flip(frame, frame, -1);
+    else if (requested_.flip_horizontal) cv::flip(frame, frame, 1);
+    else if (requested_.flip_vertical) cv::flip(frame, frame, 0);
+}
 
-        std::ofstream coutf(csv_file);
-        if (!coutf.is_open())
-            return false;
-        coutf << "camera_index,backend,req_width,req_height,req_fps,req_fourcc,act_width,act_height,act_fps,act_fourcc,opened,stable,measured_fps,mean_luma,stddev_luma,note\n";
-        for (const auto& r : report.results)
-        {
-            coutf << r.camera_index << ','
-                  << backend_to_string(r.backend) << ','
-                  << r.requested_mode.width << ','
-                  << r.requested_mode.height << ','
-                  << r.requested_mode.fps << ','
-                  << r.requested_mode.fourcc << ','
-                  << r.actual_mode.width << ','
-                  << r.actual_mode.height << ','
-                  << r.actual_mode.fps << ','
-                  << r.actual_mode.fourcc << ','
-                  << (r.opened ? 1 : 0) << ','
-                  << (r.stable ? 1 : 0) << ','
-                  << r.measured_fps << ','
-                  << r.mean_luma << ','
-                  << r.stddev_luma << ','
-                  << r.note << '\n';
+bool CameraDevice::read(cv::Mat& frame, std::string* err) {
+    if (!isOpen()) {
+        if (err) *err = "camera not open";
+        return false;
+    }
+    if (!cap_.read(frame) || frame.empty()) {
+        if (err) *err = "camera read failed";
+        return false;
+    }
+    applyConfiguredFlips(frame);
+    return true;
+}
+
+double CameraDevice::measureFps(int warmup_frames, int measure_frames, std::string* err) {
+    cv::Mat frame;
+    for (int i = 0; i < warmup_frames; ++i) {
+        if (!read(frame, err)) return 0.0;
+    }
+    const int64_t t0 = cv::getTickCount();
+    int ok = 0;
+    for (int i = 0; i < measure_frames; ++i) {
+        if (!read(frame, err)) break;
+        ++ok;
+    }
+    const double dt = (cv::getTickCount() - t0) / cv::getTickFrequency();
+    if (dt <= 0.0) return 0.0;
+    return ok / dt;
+}
+
+CameraConfig CameraDevice::actualConfig() const { return actual_; }
+
+static std::string shellEscape(const std::string& s) {
+    std::string out = "'";
+    for (char ch : s) {
+        if (ch == '\'') out += "'\\''";
+        else out.push_back(ch);
+    }
+    out += "'";
+    return out;
+}
+
+bool ProbeRunner::writeV4L2Report(const AppConfig& cfg, std::string* err) {
+    ensureParentDir(cfg.camera.probe_report_path);
+    std::ostringstream cmd;
+    cmd << "bash -lc \"v4l2-ctl -d /dev/video" << cfg.camera.device_index
+        << " --list-formats-ext > " << shellEscape(cfg.camera.probe_report_path) << "\"";
+    const int rc = std::system(cmd.str().c_str());
+    if (rc != 0 && err) *err = "v4l2-ctl command failed";
+    return rc == 0;
+}
+
+bool ProbeRunner::runOpenCvProbe(const AppConfig& cfg, std::vector<ProbeRow>& rows, std::string* err) {
+    const std::vector<CandidateMode> candidates = {
+        {320,240,30,"MJPG"}, {640,480,30,"MJPG"}, {640,480,60,"MJPG"},
+        {1280,720,30,"MJPG"}, {1920,1080,30,"MJPG"}
+    };
+
+    rows.clear();
+    for (const auto& c : candidates) {
+        ProbeRow row{};
+        row.requested_width = c.width;
+        row.requested_height = c.height;
+        row.requested_fps = c.fps;
+        row.requested_fourcc = c.fourcc;
+
+        CameraConfig cam_cfg = cfg.camera;
+        cam_cfg.width = c.width;
+        cam_cfg.height = c.height;
+        cam_cfg.fps = c.fps;
+        cam_cfg.fourcc = c.fourcc;
+
+        CameraDevice cam;
+        std::string local_err;
+        row.open_ok = cam.open(cam_cfg, &local_err);
+        if (!row.open_ok) {
+            row.notes = local_err;
+            rows.push_back(row);
+            continue;
         }
-
-        std::ofstream tout(txt_file);
-        if (!tout.is_open())
-            return false;
-        tout << "==== v4l2-ctl --list-devices ====\n";
-        tout << report.list_devices_output << '\n';
-        tout << "==== v4l2-ctl -d " << report.v4l2_device << " --list-formats-ext ====\n";
-        tout << report.list_formats_output << '\n';
-
-        if (json_path) *json_path = json_file.string();
-        if (csv_path) *csv_path = csv_file.string();
-        if (txt_path) *txt_path = txt_file.string();
-        return true;
+        const auto actual = cam.actualConfig();
+        row.actual_width = actual.actual_width;
+        row.actual_height = actual.actual_height;
+        row.actual_fps = actual.actual_fps;
+        row.actual_fourcc = actual.actual_fourcc;
+        cv::Mat frame;
+        row.read_ok = cam.read(frame, &local_err);
+        if (row.read_ok) row.measured_loop_fps = cam.measureFps(30, 120, &local_err);
+        row.notes = local_err;
+        rows.push_back(row);
     }
-    catch (...)
-    {
+    return true;
+}
+
+bool ProbeRunner::writeCsv(const std::string& path, const std::vector<ProbeRow>& rows, std::string* err) {
+    try {
+        ensureParentDir(path);
+        std::ofstream ofs(path);
+        ofs << "req_w,req_h,req_fps,req_fourcc,act_w,act_h,act_fps,act_fourcc,measured_loop_fps,open_ok,read_ok,notes\n";
+        for (const auto& r : rows) {
+            ofs << r.requested_width << ',' << r.requested_height << ',' << r.requested_fps << ',' << r.requested_fourcc << ','
+                << r.actual_width << ',' << r.actual_height << ',' << std::fixed << std::setprecision(2) << r.actual_fps << ','
+                << r.actual_fourcc << ',' << r.measured_loop_fps << ',' << r.open_ok << ',' << r.read_ok << ',' << '"' << r.notes << '"' << "\n";
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (err) *err = e.what();
         return false;
     }
 }
+
+bool ProbeRunner::writeJson(const std::string& path, const AppConfig& cfg, const std::vector<ProbeRow>& rows, std::string* err) {
+    try {
+        ensureParentDir(path);
+        nlohmann::json j;
+        j["device_index"] = cfg.camera.device_index;
+        j["rows"] = nlohmann::json::array();
+        for (const auto& r : rows) {
+            j["rows"].push_back({
+                {"requested", {{"width", r.requested_width}, {"height", r.requested_height}, {"fps", r.requested_fps}, {"fourcc", r.requested_fourcc}}},
+                {"actual", {{"width", r.actual_width}, {"height", r.actual_height}, {"fps", r.actual_fps}, {"fourcc", r.actual_fourcc}}},
+                {"measured_loop_fps", r.measured_loop_fps},
+                {"open_ok", r.open_ok},
+                {"read_ok", r.read_ok},
+                {"notes", r.notes}
+            });
+        }
+        std::ofstream ofs(path);
+        ofs << j.dump(2);
+        return true;
+    } catch (const std::exception& e) {
+        if (err) *err = e.what();
+        return false;
+    }
+}
+
+} // namespace app
