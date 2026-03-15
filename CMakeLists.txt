@@ -12,10 +12,10 @@ add_executable(vision_app
     src/app_config.cpp
     src/camera_probe.cpp
     src/camera_test.cpp
+    src/report_writer.cpp
     src/stats.cpp
 )
 
-# Force main.c to compile as C++
 set_source_files_properties(src/main.c PROPERTIES LANGUAGE CXX)
 
 target_include_directories(vision_app PRIVATE inc)
