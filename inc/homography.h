@@ -31,7 +31,7 @@ private:
 
 private:
     RemapConfig cfg_;
-    cv::Ptr<cv::aruco::Dictionary> dict_;
+    cv::aruco::Dictionary dict_;
     cv::aruco::DetectorParameters params_;
     cv::aruco::ArucoDetector detector_;
 };
