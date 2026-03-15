@@ -1,12 +1,15 @@
-# Camera Combo Vision App
+# Vision App
 
-A C++ OpenCV application for a **camera + calibration + model-combination test bench**.
+A compact C++ OpenCV app for:
 
-## Modes
+- **probe**: test camera modes and write a report
+- **calibrate**: detect AprilTag, lock homography, select ROIs, save config
+- **deploy**: reuse the saved homography and ROI trigger path
 
-- `probe` – scan camera / resolution / fps combinations and generate a health report
-- `calibrate` – detect an AprilTag, compute + lock homography, define ROIs, save config
-- `deploy` – run the saved homography, monitor red ROI, trigger on image ROI capture
+## Design choice locked in
+
+Calibration and deploy use the **same active camera mode** from config.
+That keeps the homography, warped size, and ROI ratios consistent.
 
 ## Project structure
 
@@ -17,8 +20,8 @@ A C++ OpenCV application for a **camera + calibration + model-combination test b
 ├── config
 │   └── system_config.sample.json
 ├── inc
-│   ├── camera.h
 │   ├── calibration.h
+│   ├── camera.h
 │   ├── config.h
 │   ├── deploy.h
 │   └── homography.h
@@ -37,87 +40,64 @@ A C++ OpenCV application for a **camera + calibration + model-combination test b
 mkdir build
 cd build
 cmake ..
-cmake --build . -j
+make -j4
 ```
 
-### Dependencies
-
-- OpenCV **with contrib/aruco AprilTag dictionaries**
-- `nlohmann_json`
-
-On Debian / Ubuntu / Raspberry Pi OS this usually means:
+## Dependencies
 
 ```bash
 sudo apt install libopencv-dev libopencv-contrib-dev nlohmann-json3-dev
 ```
 
-## Run
-
-### Probe
+## Run from build/
 
 ```bash
-./camera_combo_vision_app probe --config ../config/system_config.sample.json
+./vision_app probe --config ../config/system_config.sample.json
+./vision_app calibrate --config ../config/system_config.sample.json
+./vision_app deploy --config ../config/system_config.sample.json
 ```
 
-### Calibrate
+## Camera probe workflow
+
+`probe` tries every candidate mode from config, reads back what the driver actually applied, measures actual capture fps, and writes JSON + CSV reports into `runtime.report_dir`.
+
+Recommended first step on a new USB camera:
 
 ```bash
-./camera_combo_vision_app calibrate --config ../config/system_config.sample.json
+v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video0 --list-formats-ext
+./vision_app probe --config ../config/system_config.sample.json
 ```
 
-### Deploy
+Then pick one usable mode from the report and copy it into `camera.requested_mode`.
 
-```bash
-./camera_combo_vision_app deploy --config ../config/system_config.sample.json
-```
+## Calibration controls
 
-## Calibration flow
+- `L` lock / unlock homography
+- `R` select red ROI on warped image
+- `I` select image ROI on warped image
+- `S` save config
+- `ESC` exit
 
-1. Open raw camera stream
-2. App searches for an AprilTag according to config:
-   - `family = auto` or a specific family
-   - `allowed_id = -1` or a specific tag id
-3. When detected, a warped top-view preview is shown
-4. Press:
-   - `L` to lock / unlock the current homography
-   - `R` to select the **red ROI** on the warped image
-   - `I` to select the **image ROI** on the warped image
-   - `S` to save config immediately
-   - `ESC` to exit
-5. ROIs are stored as normalized ratios, not fixed pixels
+## Embedded-oriented choices already applied
 
-## Deploy flow
+- one active camera mode for calibration + deploy
+- probe only measures candidate modes; deploy never changes mode
+- camera open path is shared for probe / calibration / deploy
+- MJPG can be requested through config to reduce USB bandwidth
+- buffer size hint is set to 1 when supported
+- warmup before fps measurement
+- deploy does no tag detection
+- warped output buffer is reused
+- ROI crops stay as views unless saving
+- no unnecessary heap objects in hot deploy path
 
-Deploy does **not** redetect the tag. It only:
+## Default active mode
 
-1. loads the saved homography
-2. warps each frame
-3. computes mean BGR inside the red ROI
-4. triggers when:
+The sample config uses:
 
 ```text
-R > red_threshold
-R > G + red_margin
-R > B + red_margin
+320x240 @ 60 fps MJPG
 ```
 
-5. applies cooldown so one event does not spam every frame
-6. optionally saves raw / warped / ROI images
-
-## Speed / reliability choices baked in
-
-- shared `open_camera()` path for probe/calibrate/deploy
-- backend is configurable (`V4L2`, `ANY`, `GSTREAMER`, ...)
-- optional MJPG request to reduce USB bandwidth
-- `CAP_PROP_BUFFERSIZE = 1` when backend supports it
-- probe warms up before measuring fps
-- deploy reuses frame buffers and does no tag detection
-- ROI crops are views unless a clone is actually needed for saving
-- homography is saved once, then reused
-- ROI ratios are clamped when reconstructed
-- capture / report folders are auto-created
-
-## Notes
-
-- AprilTag support depends on the OpenCV build. If `DICT_APRILTAG_36h11` is missing, the OpenCV package was likely built without the relevant contrib modules.
-- For Raspberry Pi camera stacks, direct `VideoCapture` behavior depends on the installed backend and pipeline. USB cameras typically work best with `CAP_V4L2`. CSI cameras may need a GStreamer path later.
+This is chosen to behave closer to your target high-speed low-resolution USB camera while still being less fragile than `160x120` during calibration.
