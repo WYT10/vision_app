@@ -1,14 +1,14 @@
 #include "deploy.h"
 
 #include "camera.h"
-
-#include <algorithm>
 #include "homography.h"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
+#include <iostream>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -90,6 +90,12 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
     }
 
     const cv::Size warped_size(cfg.calibration.warped_width, cfg.calibration.warped_height);
+    if (!is_safe_warp_size(warped_size))
+    {
+        if (error) *error = "Saved warped output size is unsafe; recalibrate";
+        return false;
+    }
+
     const cv::Rect red_rect = ratio_to_rect_clamped(cfg.calibration.red_roi_ratio, warped_size);
     const cv::Rect image_rect = ratio_to_rect_clamped(cfg.calibration.image_roi_ratio, warped_size);
 
@@ -109,6 +115,8 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
     cv::Mat frame;
     cv::Mat warped;
     auto last_trigger = std::chrono::steady_clock::time_point{};
+
+    std::cout << "[deploy] started\n";
 
     while (true)
     {
@@ -140,6 +148,7 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
             last_trigger = now;
             const cv::Mat roi_view = warped(image_rect);
             const std::string stamp = make_stamp();
+            std::cout << "[deploy] trigger fired at " << stamp << '\n';
             if (cfg.trigger.save_raw)
                 cv::imwrite((fs::path(cfg.trigger.capture_dir) / (stamp + "_raw.png")).string(), frame);
             if (cfg.trigger.save_warped)

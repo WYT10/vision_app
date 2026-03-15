@@ -5,6 +5,40 @@
 #include <string>
 #include <vector>
 
+/*
+==============================================================================
+config.h
+==============================================================================
+Purpose
+    Shared configuration contract for the whole application.
+
+Design notes
+    - Keep the runtime state in small plain structs.
+    - Keep the on-disk JSON shape close to these structs.
+    - Keep camera mode identical between calibration and deploy.
+
+Debugging notes
+    - If calibration and deploy disagree, check CameraMode first.
+    - If deploy refuses to start, compare requested_mode with
+      calibration.camera_mode_used.
+==============================================================================
+*/
+
+/*
+------------------------------------------------------------------------------
+ROI ratio
+------------------------------------------------------------------------------
+Input space
+    Pixel rectangle inside a warped image.
+
+Stored form
+    Normalized x/y/w/h in the range [0, 1] relative to warped output size.
+
+Why
+    The warped image size can change between calibrations, so ratios are more
+    stable than storing raw pixels.
+------------------------------------------------------------------------------
+*/
 struct RoiRatio
 {
     double x = 0.0;
@@ -13,6 +47,17 @@ struct RoiRatio
     double h = 0.0;
 };
 
+/*
+------------------------------------------------------------------------------
+Camera mode
+------------------------------------------------------------------------------
+Fields
+    width   : requested or actual frame width in pixels
+    height  : requested or actual frame height in pixels
+    fps     : requested or actual frame rate
+    fourcc  : pixel format such as MJPG or YUYV
+------------------------------------------------------------------------------
+*/
 struct CameraMode
 {
     int width = 320;
@@ -21,10 +66,32 @@ struct CameraMode
     std::string fourcc = "MJPG";
 };
 
+/*
+------------------------------------------------------------------------------
+Camera config
+------------------------------------------------------------------------------
+requested_mode
+    The single active camera mode used by both calibration and deploy.
+
+probe_candidates
+    Candidate modes tested by the probe tool.
+
+buffer_size
+    Requested backend queue length. Smaller values reduce latency when the
+    backend respects the hint.
+
+warmup_frames
+    Frames discarded after open so FPS measurement is less misleading.
+
+flip_horizontal
+    Optional debug convenience for mirrored camera mounts.
+------------------------------------------------------------------------------
+*/
 struct CameraConfig
 {
     int device_index = 0;
     std::string device_path;
+    std::string v4l2_device;
     int backend = cv::CAP_V4L2;
     CameraMode requested_mode;
     int buffer_size = 1;
@@ -39,16 +106,41 @@ struct CameraConfig
     };
 };
 
+/*
+------------------------------------------------------------------------------
+Tag detection config
+------------------------------------------------------------------------------
+family_mode
+    "auto" -> try several families
+    otherwise use allowed_family only
+
+allowed_id
+    -1 means accept any ID in the selected family set.
+------------------------------------------------------------------------------
+*/
 struct TagConfig
 {
     std::string family_mode = "auto";
     std::string allowed_family;
     int allowed_id = -1;
-    double tag_size_units = 200.0;
-    double output_padding_units = 20.0;
+    double tag_size_units = 100.0;
+    double output_padding_units = 10.0;
     bool lock_on_first_detection = false;
 };
 
+/*
+------------------------------------------------------------------------------
+Trigger config
+------------------------------------------------------------------------------
+Trigger rule
+    R > red_threshold
+    R > G + red_margin
+    R > B + red_margin
+
+cooldown_ms
+    Minimum spacing between saved trigger events.
+------------------------------------------------------------------------------
+*/
 struct TriggerConfig
 {
     double red_threshold = 180.0;
@@ -60,6 +152,20 @@ struct TriggerConfig
     std::string capture_dir = "captures";
 };
 
+/*
+------------------------------------------------------------------------------
+Runtime config
+------------------------------------------------------------------------------
+show_ui
+    Master switch for windows and overlays.
+
+headless_deploy
+    Extra guard so deploy can stay minimal even when show_ui is true in config.
+
+probe_measure_frames
+    Number of frames used for real FPS measurement after warmup.
+------------------------------------------------------------------------------
+*/
 struct RuntimeConfig
 {
     bool show_ui = true;
@@ -68,6 +174,20 @@ struct RuntimeConfig
     std::string report_dir = "reports";
 };
 
+/*
+------------------------------------------------------------------------------
+Calibration payload
+------------------------------------------------------------------------------
+valid
+    True only after a successful save from calibration mode.
+
+camera_mode_used
+    Exact camera mode that produced the saved homography and ROI data.
+
+homography
+    3x3 perspective transform from raw frame to warped ground plane.
+------------------------------------------------------------------------------
+*/
 struct CalibrationData
 {
     bool valid = false;
@@ -88,8 +208,25 @@ struct AppConfig
     CalibrationData calibration;
 };
 
+/*
+------------------------------------------------------------------------------
+JSON IO helpers
+------------------------------------------------------------------------------
+load_config
+    Input  : JSON file path
+    Output : populated AppConfig
+    Return : true on success
+
+save_config
+    Input  : JSON file path + AppConfig
+    Output : file written to disk
+    Return : true on success
+------------------------------------------------------------------------------
+*/
 bool load_config(const std::string& path, AppConfig& config, std::string* error = nullptr);
 bool save_config(const std::string& path, const AppConfig& config, std::string* error = nullptr);
+
+/* Backend and mode utilities. */
 std::string backend_to_string(int backend);
 int backend_from_string(const std::string& backend_name);
 std::string normalize_fourcc_string(const std::string& fourcc);

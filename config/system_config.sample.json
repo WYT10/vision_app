@@ -2,6 +2,7 @@
   "camera": {
     "device_index": 0,
     "device_path": "",
+    "v4l2_device": "/dev/video0",
     "backend": "V4L2",
     "requested_mode": {
       "width": 320,
@@ -14,8 +15,8 @@
     "drop_frames_per_read": 0,
     "flip_horizontal": false,
     "probe_candidates": [
-      { "width": 640, "height": 480, "fps": 60, "fourcc": "MJPG" },
-      { "width": 320, "height": 240, "fps": 60, "fourcc": "MJPG" },
+      { "width": 640, "height": 480, "fps": 60,  "fourcc": "MJPG" },
+      { "width": 320, "height": 240, "fps": 60,  "fourcc": "MJPG" },
       { "width": 160, "height": 120, "fps": 120, "fourcc": "MJPG" },
       { "width": 160, "height": 120, "fps": 180, "fourcc": "MJPG" }
     ]
@@ -24,8 +25,8 @@
     "family_mode": "auto",
     "allowed_family": "",
     "allowed_id": -1,
-    "tag_size_units": 200.0,
-    "output_padding_units": 20.0,
+    "tag_size_units": 100.0,
+    "output_padding_units": 10.0,
     "lock_on_first_detection": false
   },
   "trigger": {

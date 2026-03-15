@@ -150,6 +150,7 @@ bool load_config(const std::string& path, AppConfig& config, std::string* error)
         const auto& jc = j.value("camera", json::object());
         config.camera.device_index = jc.value("device_index", config.camera.device_index);
         config.camera.device_path = jc.value("device_path", config.camera.device_path);
+        config.camera.v4l2_device = jc.value("v4l2_device", config.camera.v4l2_device);
         config.camera.backend = backend_from_string(jc.value("backend", backend_to_string(config.camera.backend)));
         config.camera.requested_mode = mode_from_json(jc.value("requested_mode", json::object()), config.camera.requested_mode);
         config.camera.buffer_size = jc.value("buffer_size", config.camera.buffer_size);
@@ -223,6 +224,7 @@ bool save_config(const std::string& path, const AppConfig& config, std::string* 
         j["camera"] = {
             {"device_index", config.camera.device_index},
             {"device_path", config.camera.device_path},
+            {"v4l2_device", config.camera.v4l2_device},
             {"backend", backend_to_string(config.camera.backend)},
             {"requested_mode", mode_to_json(config.camera.requested_mode)},
             {"buffer_size", config.camera.buffer_size},

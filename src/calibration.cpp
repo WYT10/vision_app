@@ -1,12 +1,12 @@
 #include "calibration.h"
 
 #include "camera.h"
-
-#include <algorithm>
 #include "homography.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iostream>
 #include <map>
 #include <opencv2/aruco.hpp>
 #include <opencv2/highgui.hpp>
@@ -16,6 +16,14 @@
 
 namespace
 {
+/*
+------------------------------------------------------------------------------
+Detection container
+------------------------------------------------------------------------------
+Output of the internal AprilTag finder. This is intentionally local to the
+calibration translation unit because deploy does not redetect tags.
+------------------------------------------------------------------------------
+*/
 struct Detection
 {
     std::string family;
@@ -55,6 +63,21 @@ std::vector<std::pair<std::string, int>> active_families(const TagConfig& cfg)
     return out;
 }
 
+/*
+------------------------------------------------------------------------------
+detect_tag
+------------------------------------------------------------------------------
+Input
+    gray : grayscale frame
+    cfg  : tag family / ID policy
+
+Output
+    detection : first accepted detection
+
+Return
+    true when a matching AprilTag is found.
+------------------------------------------------------------------------------
+*/
 bool detect_tag(const cv::Mat& gray, const TagConfig& cfg, Detection& detection)
 {
     const auto families = active_families(cfg);
@@ -129,6 +152,12 @@ bool select_roi_from_window(const std::string& window_name, const cv::Mat& image
     out_rect = rect;
     return true;
 }
+
+void print_mode_summary(const char* prefix, const CameraMode& mode)
+{
+    std::cout << prefix << mode.width << 'x' << mode.height << '@' << mode.fps
+              << ' ' << normalize_fourcc_string(mode.fourcc) << '\n';
+}
 }
 
 bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string* error)
@@ -137,6 +166,9 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
     CameraMode actual_mode;
     if (!open_camera(cap, cfg.camera, &actual_mode, error))
         return false;
+
+    std::cout << "[calibration] camera opened\n";
+    print_mode_summary("[calibration] actual mode: ", actual_mode);
 
     const std::string raw_window = "raw";
     const std::string warp_window = "warped";
@@ -189,6 +221,15 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
                 cfg.tag.output_padding_units,
                 preview_H,
                 preview_size);
+
+            if (preview_ok && !is_safe_warp_size(preview_size))
+            {
+                std::cout << "[calibration] rejected unsafe warp size "
+                          << preview_size.width << 'x' << preview_size.height << "\n";
+                preview_ok = false;
+                preview_H.release();
+                preview_size = {};
+            }
         }
 
         if (cfg.tag.lock_on_first_detection && !locked && preview_ok)
@@ -196,6 +237,7 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
             locked = true;
             locked_H = preview_H.clone();
             locked_size = preview_size;
+            std::cout << "[calibration] auto-locked homography\n";
         }
 
         const cv::Mat& H_use = locked ? locked_H : preview_H;
@@ -255,6 +297,11 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
                     image_rect = {};
                     cfg.calibration.red_roi_ratio = {};
                     cfg.calibration.image_roi_ratio = {};
+                    std::cout << "[calibration] locked homography at " << locked_size.width << 'x' << locked_size.height << "\n";
+                }
+                else
+                {
+                    std::cout << "[calibration] unlocked homography\n";
                 }
             }
         }
@@ -264,7 +311,10 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
             {
                 cv::Mat frozen = warped.clone();
                 if (select_roi_from_window(warp_window, frozen, red_rect))
+                {
                     cfg.calibration.red_roi_ratio = rect_to_ratio(red_rect, locked_size);
+                    std::cout << "[calibration] red ROI selected\n";
+                }
             }
         }
         else if (key == 'i' || key == 'I')
@@ -273,7 +323,10 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
             {
                 cv::Mat frozen = warped.clone();
                 if (select_roi_from_window(warp_window, frozen, image_rect))
+                {
                     cfg.calibration.image_roi_ratio = rect_to_ratio(image_rect, locked_size);
+                    std::cout << "[calibration] image ROI selected\n";
+                }
             }
         }
         else if (key == 's' || key == 'S')
@@ -281,6 +334,7 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
             if (!locked || locked_H.empty() || !is_valid_ratio_roi(cfg.calibration.red_roi_ratio) || !is_valid_ratio_roi(cfg.calibration.image_roi_ratio))
             {
                 if (error) *error = "Need locked homography + both ROIs before save";
+                std::cout << "[calibration] save blocked: need locked homography + both ROIs\n";
                 continue;
             }
 
@@ -296,6 +350,7 @@ bool run_calibration(AppConfig& cfg, const std::string& config_path, std::string
                 if (error) *error = save_error;
                 return false;
             }
+            std::cout << "[calibration] config saved to " << config_path << '\n';
         }
     }
 

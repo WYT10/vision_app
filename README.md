@@ -2,7 +2,7 @@
 
 A compact C++ OpenCV app for:
 
-- **probe**: test camera modes and write a report
+- **probe**: enumerate USB camera capabilities and run quick real capture tests
 - **calibrate**: detect AprilTag, lock homography, select ROIs, save config
 - **deploy**: reuse the saved homography and ROI trigger path
 
@@ -46,7 +46,7 @@ make -j4
 ## Dependencies
 
 ```bash
-sudo apt install libopencv-dev libopencv-contrib-dev nlohmann-json3-dev
+sudo apt install libopencv-dev libopencv-contrib-dev nlohmann-json3-dev v4l-utils
 ```
 
 ## Run from build/
@@ -57,9 +57,23 @@ sudo apt install libopencv-dev libopencv-contrib-dev nlohmann-json3-dev
 ./vision_app deploy --config ../config/system_config.sample.json
 ```
 
-## Camera probe workflow
+## Probe behavior
 
-`probe` tries every candidate mode from config, reads back what the driver actually applied, measures actual capture fps, and writes JSON + CSV reports into `runtime.report_dir`.
+The probe now has **two layers**:
+
+1. **Driver enumeration layer**
+   - runs the same V4L2 commands you would use manually
+   - stores the raw output in the report bundle
+2. **Real capture test layer**
+   - requests each candidate mode via OpenCV
+   - measures actual capture FPS after warmup
+   - records requested vs actual mode
+
+Generated files:
+
+- `camera_probe_*.json`
+- `camera_probe_*.csv`
+- `camera_probe_*_v4l2.txt`
 
 Recommended first step on a new USB camera:
 
@@ -86,10 +100,11 @@ Then pick one usable mode from the report and copy it into `camera.requested_mod
 - camera open path is shared for probe / calibration / deploy
 - MJPG can be requested through config to reduce USB bandwidth
 - buffer size hint is set to 1 when supported
-- warmup before fps measurement
+- warmup before FPS measurement
 - deploy does no tag detection
 - warped output buffer is reused
 - ROI crops stay as views unless saving
+- unsafe warp sizes are rejected before allocation
 - no unnecessary heap objects in hot deploy path
 
 ## Default active mode

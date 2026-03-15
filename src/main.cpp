@@ -145,15 +145,19 @@ int main(int argc, char** argv)
 
     if (cli.mode == "probe")
     {
-        const auto results = run_camera_probe(cfg);
+        const ProbeReport report = run_camera_probe(cfg);
         std::string json_path;
         std::string csv_path;
-        if (!write_probe_report(cfg.runtime.report_dir, results, &json_path, &csv_path))
+        std::string txt_path;
+        if (!write_probe_report(cfg.runtime.report_dir, report, &json_path, &csv_path, &txt_path))
         {
             std::cerr << "Failed to write probe report\n";
             return 1;
         }
-        std::cout << "Probe report written:\n  JSON: " << json_path << "\n  CSV:  " << csv_path << '\n';
+        std::cout << "Probe report written:\n"
+                  << "  JSON: " << json_path << "\n"
+                  << "  CSV:  " << csv_path << "\n"
+                  << "  V4L2: " << txt_path << '\n';
         return 0;
     }
 

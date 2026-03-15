@@ -124,3 +124,17 @@ bool is_valid_ratio_roi(const RoiRatio& ratio)
 {
     return ratio.w > 0.0 && ratio.h > 0.0;
 }
+
+bool is_safe_warp_size(const cv::Size& size)
+{
+    if (size.width <= 0 || size.height <= 0)
+        return false;
+
+    constexpr int kMaxSide = 2048;
+    constexpr long long kMaxPixels = 1500000;
+    const long long pixels = 1LL * size.width * size.height;
+
+    return size.width <= kMaxSide &&
+           size.height <= kMaxSide &&
+           pixels <= kMaxPixels;
+}
