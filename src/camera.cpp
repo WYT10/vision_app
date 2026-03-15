@@ -1,13 +1,14 @@
 #include "camera.h"
 
 #include <chrono>
+#include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <sstream>
-#include <ctime>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
+#include <sstream>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -30,27 +31,58 @@ std::string make_timestamp_string()
     return oss.str();
 }
 
-void apply_camera_settings(cv::VideoCapture& cap, const CameraConfig& cfg)
+int fourcc_to_int(const std::string& fourcc)
 {
-    if (cfg.prefer_mjpg)
-        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
-    if (cfg.buffer_size > 0)
-        cap.set(cv::CAP_PROP_BUFFERSIZE, cfg.buffer_size);
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, cfg.width);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
-    cap.set(cv::CAP_PROP_FPS, cfg.fps);
+    const std::string f = normalize_fourcc_string(fourcc);
+    return cv::VideoWriter::fourcc(f[0], f[1], f[2], f[3]);
 }
 
-ProbeResult probe_one(int index, int backend, int width, int height, int fps, int warmup_frames, int measure_frames)
+std::string int_to_fourcc(double value)
+{
+    const int code = static_cast<int>(value);
+    std::string out(4, ' ');
+    out[0] = static_cast<char>(code & 0xFF);
+    out[1] = static_cast<char>((code >> 8) & 0xFF);
+    out[2] = static_cast<char>((code >> 16) & 0xFF);
+    out[3] = static_cast<char>((code >> 24) & 0xFF);
+    return normalize_fourcc_string(out);
+}
+
+void apply_camera_settings(cv::VideoCapture& cap, const CameraConfig& cfg, const CameraMode& mode)
+{
+    cap.set(cv::CAP_PROP_FOURCC, fourcc_to_int(mode.fourcc));
+    if (cfg.buffer_size > 0)
+        cap.set(cv::CAP_PROP_BUFFERSIZE, cfg.buffer_size);
+    cap.set(cv::CAP_PROP_FRAME_WIDTH, mode.width);
+    cap.set(cv::CAP_PROP_FRAME_HEIGHT, mode.height);
+    cap.set(cv::CAP_PROP_FPS, mode.fps);
+}
+
+CameraMode query_actual_mode(cv::VideoCapture& cap)
+{
+    CameraMode out;
+    out.width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+    out.height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+    out.fps = static_cast<int>(std::round(cap.get(cv::CAP_PROP_FPS)));
+    out.fourcc = int_to_fourcc(cap.get(cv::CAP_PROP_FOURCC));
+    return out;
+}
+
+ProbeResult probe_one(const CameraConfig& camera_cfg, const CameraMode& mode, int measure_frames)
 {
     ProbeResult result;
-    result.camera_index = index;
-    result.backend = backend;
-    result.requested_width = width;
-    result.requested_height = height;
-    result.requested_fps = fps;
+    result.camera_index = camera_cfg.device_index;
+    result.device_path = camera_cfg.device_path;
+    result.backend = camera_cfg.backend;
+    result.requested_mode = mode;
 
-    cv::VideoCapture cap(index, backend);
+    cv::VideoCapture cap;
+    const bool use_path = !camera_cfg.device_path.empty();
+    if (use_path)
+        cap.open(camera_cfg.device_path, camera_cfg.backend);
+    else
+        cap.open(camera_cfg.device_index, camera_cfg.backend);
+
     if (!cap.isOpened())
     {
         result.note = "open_failed";
@@ -58,22 +90,11 @@ ProbeResult probe_one(int index, int backend, int width, int height, int fps, in
     }
 
     result.opened = true;
-    CameraConfig cfg;
-    cfg.index = index;
-    cfg.width = width;
-    cfg.height = height;
-    cfg.fps = fps;
-    cfg.backend = backend;
-    cfg.prefer_mjpg = true;
-    cfg.buffer_size = 1;
-    apply_camera_settings(cap, cfg);
-
-    result.actual_width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-    result.actual_height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-    result.actual_fps_property = cap.get(cv::CAP_PROP_FPS);
+    apply_camera_settings(cap, camera_cfg, mode);
+    result.actual_mode = query_actual_mode(cap);
 
     cv::Mat frame;
-    for (int i = 0; i < warmup_frames; ++i)
+    for (int i = 0; i < camera_cfg.warmup_frames; ++i)
     {
         if (!cap.read(frame) || frame.empty())
         {
@@ -83,8 +104,8 @@ ProbeResult probe_one(int index, int backend, int width, int height, int fps, in
     }
 
     int good_frames = 0;
-    double luma_sum = 0.0;
-    double luma_sq_sum = 0.0;
+    double mean_sum = 0.0;
+    double std_sum = 0.0;
 
     const auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < measure_frames; ++i)
@@ -103,8 +124,8 @@ ProbeResult probe_one(int index, int backend, int width, int height, int fps, in
 
         cv::Scalar mean, stddev;
         cv::meanStdDev(gray, mean, stddev);
-        luma_sum += mean[0];
-        luma_sq_sum += stddev[0];
+        mean_sum += mean[0];
+        std_sum += stddev[0];
         ++good_frames;
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -114,31 +135,47 @@ ProbeResult probe_one(int index, int backend, int width, int height, int fps, in
         const double seconds = std::chrono::duration<double>(t1 - t0).count();
         if (seconds > 0.0)
             result.measured_fps = static_cast<double>(good_frames) / seconds;
-        result.mean_luma = luma_sum / static_cast<double>(good_frames);
-        result.stddev_luma = luma_sq_sum / static_cast<double>(good_frames);
+        result.mean_luma = mean_sum / static_cast<double>(good_frames);
+        result.stddev_luma = std_sum / static_cast<double>(good_frames);
         result.stable = (good_frames == measure_frames);
-        if (result.note.empty())
-            result.note = result.stable ? "ok" : "partial";
     }
-    else if (result.note.empty())
+
+    if (result.note.empty())
     {
-        result.note = "no_frames";
+        if (!camera_modes_match(result.actual_mode, mode))
+            result.note = "mode_mismatch";
+        else if (result.stable)
+            result.note = "ok";
+        else
+            result.note = "partial";
     }
 
     return result;
 }
 }
 
-bool open_camera(cv::VideoCapture& cap, const CameraConfig& cfg, std::string* error)
+bool open_camera(cv::VideoCapture& cap, const CameraConfig& cfg, CameraMode* actual_mode, std::string* error)
 {
-    cap.open(cfg.index, cfg.backend);
+    const bool use_path = !cfg.device_path.empty();
+    if (use_path)
+        cap.open(cfg.device_path, cfg.backend);
+    else
+        cap.open(cfg.device_index, cfg.backend);
+
     if (!cap.isOpened())
     {
-        if (error) *error = "Failed to open camera index " + std::to_string(cfg.index) + " with " + backend_to_string(cfg.backend);
+        if (error)
+        {
+            std::ostringstream oss;
+            oss << "Failed to open camera "
+                << (use_path ? cfg.device_path : std::to_string(cfg.device_index))
+                << " with backend " << backend_to_string(cfg.backend);
+            *error = oss.str();
+        }
         return false;
     }
 
-    apply_camera_settings(cap, cfg);
+    apply_camera_settings(cap, cfg, cfg.requested_mode);
 
     cv::Mat frame;
     for (int i = 0; i < cfg.warmup_frames; ++i)
@@ -149,6 +186,9 @@ bool open_camera(cv::VideoCapture& cap, const CameraConfig& cfg, std::string* er
             return false;
         }
     }
+
+    if (actual_mode)
+        *actual_mode = query_actual_mode(cap);
     return true;
 }
 
@@ -165,27 +205,11 @@ bool read_frame(cv::VideoCapture& cap, cv::Mat& frame, int drop_frames_per_read)
 std::vector<ProbeResult> run_camera_probe(const AppConfig& cfg)
 {
     std::vector<ProbeResult> results;
-    for (int index : cfg.probe.camera_indices)
-    {
-        for (int backend : cfg.probe.backends)
-        {
-            const size_t n = std::min(cfg.probe.widths.size(), cfg.probe.heights.size());
-            for (size_t i = 0; i < n; ++i)
-            {
-                for (int fps : cfg.probe.fps_values)
-                {
-                    results.push_back(
-                        probe_one(index,
-                                  backend,
-                                  cfg.probe.widths[i],
-                                  cfg.probe.heights[i],
-                                  fps,
-                                  cfg.probe.warmup_frames,
-                                  cfg.probe.measure_frames));
-                }
-            }
-        }
-    }
+    results.reserve(cfg.camera.probe_candidates.size());
+
+    for (const auto& mode : cfg.camera.probe_candidates)
+        results.push_back(probe_one(cfg.camera, mode, cfg.runtime.probe_measure_frames));
+
     return results;
 }
 
@@ -203,17 +227,23 @@ bool write_probe_report(const std::string& report_dir, const std::vector<ProbeRe
         {
             j.push_back({
                 {"camera_index", r.camera_index},
-                {"backend", r.backend},
-                {"backend_name", backend_to_string(r.backend)},
-                {"requested_width", r.requested_width},
-                {"requested_height", r.requested_height},
-                {"requested_fps", r.requested_fps},
-                {"actual_width", r.actual_width},
-                {"actual_height", r.actual_height},
-                {"actual_fps_property", r.actual_fps_property},
-                {"measured_fps", r.measured_fps},
+                {"device_path", r.device_path},
+                {"backend", backend_to_string(r.backend)},
+                {"requested_mode", {
+                    {"width", r.requested_mode.width},
+                    {"height", r.requested_mode.height},
+                    {"fps", r.requested_mode.fps},
+                    {"fourcc", r.requested_mode.fourcc}
+                }},
+                {"actual_mode", {
+                    {"width", r.actual_mode.width},
+                    {"height", r.actual_mode.height},
+                    {"fps", r.actual_mode.fps},
+                    {"fourcc", r.actual_mode.fourcc}
+                }},
                 {"opened", r.opened},
                 {"stable", r.stable},
+                {"measured_fps", r.measured_fps},
                 {"mean_luma", r.mean_luma},
                 {"stddev_luma", r.stddev_luma},
                 {"note", r.note}
@@ -221,23 +251,29 @@ bool write_probe_report(const std::string& report_dir, const std::vector<ProbeRe
         }
 
         std::ofstream jout(json_file);
+        if (!jout.is_open())
+            return false;
         jout << j.dump(2) << '\n';
 
         std::ofstream coutf(csv_file);
-        coutf << "camera_index,backend,requested_width,requested_height,requested_fps,actual_width,actual_height,actual_fps_property,measured_fps,opened,stable,mean_luma,stddev_luma,note\n";
+        if (!coutf.is_open())
+            return false;
+        coutf << "camera_index,backend,req_width,req_height,req_fps,req_fourcc,act_width,act_height,act_fps,act_fourcc,opened,stable,measured_fps,mean_luma,stddev_luma,note\n";
         for (const auto& r : results)
         {
             coutf << r.camera_index << ','
                   << backend_to_string(r.backend) << ','
-                  << r.requested_width << ','
-                  << r.requested_height << ','
-                  << r.requested_fps << ','
-                  << r.actual_width << ','
-                  << r.actual_height << ','
-                  << r.actual_fps_property << ','
-                  << r.measured_fps << ','
+                  << r.requested_mode.width << ','
+                  << r.requested_mode.height << ','
+                  << r.requested_mode.fps << ','
+                  << r.requested_mode.fourcc << ','
+                  << r.actual_mode.width << ','
+                  << r.actual_mode.height << ','
+                  << r.actual_mode.fps << ','
+                  << r.actual_mode.fourcc << ','
                   << (r.opened ? 1 : 0) << ','
                   << (r.stable ? 1 : 0) << ','
+                  << r.measured_fps << ','
                   << r.mean_luma << ','
                   << r.stddev_luma << ','
                   << r.note << '\n';

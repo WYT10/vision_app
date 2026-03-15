@@ -1,9 +1,9 @@
 #pragma once
 
-#include <string>
-#include <vector>
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
+#include <string>
+#include <vector>
 
 struct RoiRatio
 {
@@ -13,35 +13,36 @@ struct RoiRatio
     double h = 0.0;
 };
 
-struct CameraConfig
+struct CameraMode
 {
-    int index = 0;
-    int width = 1280;
-    int height = 720;
-    int fps = 30;
-    int backend = cv::CAP_V4L2;
-    bool prefer_mjpg = true;
-    int buffer_size = 1;
-    int warmup_frames = 30;
-    int drop_frames_per_read = 0;
-    bool flip_horizontal = false;
+    int width = 320;
+    int height = 240;
+    int fps = 60;
+    std::string fourcc = "MJPG";
 };
 
-struct ProbeConfig
+struct CameraConfig
 {
-    std::vector<int> camera_indices {0, 1, 2, 3};
-    std::vector<int> widths {640, 1280, 1920};
-    std::vector<int> heights {480, 720, 1080};
-    std::vector<int> fps_values {30, 60};
-    std::vector<int> backends {cv::CAP_V4L2, cv::CAP_ANY};
-    int warmup_frames = 30;
-    int measure_frames = 120;
-    std::string report_dir = "reports";
+    int device_index = 0;
+    std::string device_path;
+    int backend = cv::CAP_V4L2;
+    CameraMode requested_mode;
+    int buffer_size = 1;
+    int warmup_frames = 20;
+    int drop_frames_per_read = 0;
+    bool flip_horizontal = false;
+    std::vector<CameraMode> probe_candidates {
+        {640, 480, 60, "MJPG"},
+        {320, 240, 60, "MJPG"},
+        {160, 120, 120, "MJPG"},
+        {160, 120, 180, "MJPG"}
+    };
 };
 
 struct TagConfig
 {
-    std::string family = "auto";
+    std::string family_mode = "auto";
+    std::string allowed_family;
     int allowed_id = -1;
     double tag_size_units = 200.0;
     double output_padding_units = 20.0;
@@ -63,22 +64,24 @@ struct RuntimeConfig
 {
     bool show_ui = true;
     bool headless_deploy = false;
+    int probe_measure_frames = 120;
+    std::string report_dir = "reports";
 };
 
 struct CalibrationData
 {
     bool valid = false;
-    cv::Mat homography; // 3x3 CV_64F
+    CameraMode camera_mode_used;
+    cv::Mat homography;
     int warped_width = 0;
     int warped_height = 0;
-    RoiRatio red_roi;
-    RoiRatio image_roi;
+    RoiRatio red_roi_ratio;
+    RoiRatio image_roi_ratio;
 };
 
 struct AppConfig
 {
     CameraConfig camera;
-    ProbeConfig probe;
     TagConfig tag;
     TriggerConfig trigger;
     RuntimeConfig runtime;
@@ -88,3 +91,6 @@ struct AppConfig
 bool load_config(const std::string& path, AppConfig& config, std::string* error = nullptr);
 bool save_config(const std::string& path, const AppConfig& config, std::string* error = nullptr);
 std::string backend_to_string(int backend);
+int backend_from_string(const std::string& backend_name);
+std::string normalize_fourcc_string(const std::string& fourcc);
+bool camera_modes_match(const CameraMode& a, const CameraMode& b);

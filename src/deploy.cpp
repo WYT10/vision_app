@@ -1,16 +1,18 @@
 #include "deploy.h"
 
 #include "camera.h"
+
+#include <algorithm>
 #include "homography.h"
 
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <sstream>
-#include <ctime>
 
 namespace fs = std::filesystem;
 
@@ -41,7 +43,7 @@ void draw_roi(cv::Mat& image, const cv::Rect& rect, const cv::Scalar& color, con
                 label,
                 cv::Point(rect.x, std::max(18, rect.y - 4)),
                 cv::FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.55,
                 color,
                 2,
                 cv::LINE_AA);
@@ -60,26 +62,40 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
 {
     if (!cfg.calibration.valid || cfg.calibration.homography.empty() || cfg.calibration.warped_width <= 0 || cfg.calibration.warped_height <= 0)
     {
-        if (error) *error = "Deploy requires a valid saved calibration";
+        if (error) *error = "Deploy requires valid calibration data";
         return false;
     }
-    if (!is_valid_ratio_roi(cfg.calibration.red_roi) || !is_valid_ratio_roi(cfg.calibration.image_roi))
+
+    if (!camera_modes_match(cfg.camera.requested_mode, cfg.calibration.camera_mode_used))
     {
-        if (error) *error = "Deploy requires both red_roi and image_roi";
+        if (error) *error = "Requested camera mode does not match calibration camera mode";
+        return false;
+    }
+
+    if (!is_valid_ratio_roi(cfg.calibration.red_roi_ratio) || !is_valid_ratio_roi(cfg.calibration.image_roi_ratio))
+    {
+        if (error) *error = "Deploy requires both saved ROIs";
         return false;
     }
 
     cv::VideoCapture cap;
-    if (!open_camera(cap, cfg.camera, error))
+    CameraMode actual_mode;
+    if (!open_camera(cap, cfg.camera, &actual_mode, error))
         return false;
 
+    if (!camera_modes_match(actual_mode, cfg.calibration.camera_mode_used))
+    {
+        if (error) *error = "Camera opened in a different actual mode than calibration";
+        return false;
+    }
+
     const cv::Size warped_size(cfg.calibration.warped_width, cfg.calibration.warped_height);
-    const cv::Rect red_rect = ratio_to_rect_clamped(cfg.calibration.red_roi, warped_size);
-    const cv::Rect image_rect = ratio_to_rect_clamped(cfg.calibration.image_roi, warped_size);
+    const cv::Rect red_rect = ratio_to_rect_clamped(cfg.calibration.red_roi_ratio, warped_size);
+    const cv::Rect image_rect = ratio_to_rect_clamped(cfg.calibration.image_roi_ratio, warped_size);
 
     if (red_rect.width <= 0 || red_rect.height <= 0 || image_rect.width <= 0 || image_rect.height <= 0)
     {
-        if (error) *error = "Reconstructed ROI is invalid after clamping";
+        if (error) *error = "Invalid ROI after reconstruction";
         return false;
     }
 
@@ -114,6 +130,7 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
         const cv::Mat red_view = warped(red_rect);
         const cv::Scalar mean_bgr = cv::mean(red_view);
         const bool trigger_now = is_red_trigger(mean_bgr, cfg.trigger);
+
         const auto now = std::chrono::steady_clock::now();
         const bool cooldown_ok = last_trigger.time_since_epoch().count() == 0 ||
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= cfg.trigger.cooldown_ms;
@@ -136,17 +153,19 @@ bool run_deploy(const AppConfig& cfg, std::string* error)
             cv::Mat vis = warped.clone();
             draw_roi(vis, red_rect, cv::Scalar(0, 0, 255), "red_roi");
             draw_roi(vis, image_rect, cv::Scalar(255, 255, 0), "image_roi");
+
             std::ostringstream oss;
             oss << "B=" << mean_bgr[0] << " G=" << mean_bgr[1] << " R=" << mean_bgr[2]
-                << " trigger=" << (trigger_now ? "1" : "0");
+                << " trigger=" << (trigger_now ? 1 : 0);
             cv::putText(vis,
                         oss.str(),
                         cv::Point(10, 24),
                         cv::FONT_HERSHEY_SIMPLEX,
-                        0.6,
+                        0.55,
                         cv::Scalar(0, 255, 255),
                         2,
                         cv::LINE_AA);
+
             cv::imshow("deploy", vis);
             const int key = cv::waitKey(1) & 0xFF;
             if (key == 27)

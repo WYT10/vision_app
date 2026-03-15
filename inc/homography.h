@@ -13,7 +13,6 @@ bool compute_homography_from_tag(
     cv::Size& warped_size);
 
 bool warp_frame(const cv::Mat& input, cv::Mat& output, const cv::Mat& homography, const cv::Size& warped_size);
-
 RoiRatio rect_to_ratio(const cv::Rect& rect, const cv::Size& bounds);
 cv::Rect ratio_to_rect_clamped(const RoiRatio& ratio, const cv::Size& bounds);
 bool is_valid_ratio_roi(const RoiRatio& ratio);

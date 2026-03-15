@@ -1,9 +1,10 @@
 #include "config.h"
 
-#include <fstream>
-#include <sstream>
+#include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <unordered_map>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -23,6 +24,21 @@ RoiRatio roi_from_json(const json& j)
     roi.w = j.value("w", 0.0);
     roi.h = j.value("h", 0.0);
     return roi;
+}
+
+json mode_to_json(const CameraMode& mode)
+{
+    return json{{"width", mode.width}, {"height", mode.height}, {"fps", mode.fps}, {"fourcc", mode.fourcc}};
+}
+
+CameraMode mode_from_json(const json& j, const CameraMode& defaults)
+{
+    CameraMode mode = defaults;
+    mode.width = j.value("width", mode.width);
+    mode.height = j.value("height", mode.height);
+    mode.fps = j.value("fps", mode.fps);
+    mode.fourcc = normalize_fourcc_string(j.value("fourcc", mode.fourcc));
+    return mode;
 }
 
 json homography_to_json(const cv::Mat& H)
@@ -51,6 +67,72 @@ cv::Mat homography_from_json(const json& j)
 }
 }
 
+std::string normalize_fourcc_string(const std::string& fourcc)
+{
+    if (fourcc.empty())
+        return "MJPG";
+
+    std::string out = fourcc;
+    for (char& ch : out)
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (out.size() > 4)
+        out.resize(4);
+    while (out.size() < 4)
+        out.push_back(' ');
+    return out;
+}
+
+std::string backend_to_string(int backend)
+{
+    switch (backend)
+    {
+        case cv::CAP_ANY: return "ANY";
+        case cv::CAP_V4L2: return "V4L2";
+        case cv::CAP_GSTREAMER: return "GSTREAMER";
+        case cv::CAP_FFMPEG: return "FFMPEG";
+        case cv::CAP_DSHOW: return "DSHOW";
+        case cv::CAP_MSMF: return "MSMF";
+        default: return std::to_string(backend);
+    }
+}
+
+int backend_from_string(const std::string& backend_name)
+{
+    static const std::unordered_map<std::string, int> table = {
+        {"ANY", cv::CAP_ANY},
+        {"V4L2", cv::CAP_V4L2},
+        {"GSTREAMER", cv::CAP_GSTREAMER},
+        {"FFMPEG", cv::CAP_FFMPEG},
+        {"DSHOW", cv::CAP_DSHOW},
+        {"MSMF", cv::CAP_MSMF}
+    };
+
+    auto it = table.find(backend_name);
+    if (it != table.end())
+        return it->second;
+
+    try
+    {
+        return std::stoi(backend_name);
+    }
+    catch (...)
+    {
+        return cv::CAP_V4L2;
+    }
+}
+
+bool camera_modes_match(const CameraMode& a, const CameraMode& b)
+{
+    if (a.width != b.width || a.height != b.height)
+        return false;
+
+    const bool fps_known = a.fps > 0 && b.fps > 0;
+    if (fps_known && a.fps != b.fps)
+        return false;
+
+    return normalize_fourcc_string(a.fourcc) == normalize_fourcc_string(b.fourcc);
+}
+
 bool load_config(const std::string& path, AppConfig& config, std::string* error)
 {
     try
@@ -66,29 +148,27 @@ bool load_config(const std::string& path, AppConfig& config, std::string* error)
         in >> j;
 
         const auto& jc = j.value("camera", json::object());
-        config.camera.index = jc.value("index", config.camera.index);
-        config.camera.width = jc.value("width", config.camera.width);
-        config.camera.height = jc.value("height", config.camera.height);
-        config.camera.fps = jc.value("fps", config.camera.fps);
-        config.camera.backend = jc.value("backend", config.camera.backend);
-        config.camera.prefer_mjpg = jc.value("prefer_mjpg", config.camera.prefer_mjpg);
+        config.camera.device_index = jc.value("device_index", config.camera.device_index);
+        config.camera.device_path = jc.value("device_path", config.camera.device_path);
+        config.camera.backend = backend_from_string(jc.value("backend", backend_to_string(config.camera.backend)));
+        config.camera.requested_mode = mode_from_json(jc.value("requested_mode", json::object()), config.camera.requested_mode);
         config.camera.buffer_size = jc.value("buffer_size", config.camera.buffer_size);
         config.camera.warmup_frames = jc.value("warmup_frames", config.camera.warmup_frames);
         config.camera.drop_frames_per_read = jc.value("drop_frames_per_read", config.camera.drop_frames_per_read);
         config.camera.flip_horizontal = jc.value("flip_horizontal", config.camera.flip_horizontal);
 
-        const auto& jp = j.value("probe", json::object());
-        config.probe.camera_indices = jp.value("camera_indices", config.probe.camera_indices);
-        config.probe.widths = jp.value("widths", config.probe.widths);
-        config.probe.heights = jp.value("heights", config.probe.heights);
-        config.probe.fps_values = jp.value("fps_values", config.probe.fps_values);
-        config.probe.backends = jp.value("backends", config.probe.backends);
-        config.probe.warmup_frames = jp.value("warmup_frames", config.probe.warmup_frames);
-        config.probe.measure_frames = jp.value("measure_frames", config.probe.measure_frames);
-        config.probe.report_dir = jp.value("report_dir", config.probe.report_dir);
+        config.camera.probe_candidates.clear();
+        if (jc.contains("probe_candidates") && jc["probe_candidates"].is_array())
+        {
+            for (const auto& item : jc["probe_candidates"])
+                config.camera.probe_candidates.push_back(mode_from_json(item, config.camera.requested_mode));
+        }
+        if (config.camera.probe_candidates.empty())
+            config.camera.probe_candidates.push_back(config.camera.requested_mode);
 
         const auto& jt = j.value("tag", json::object());
-        config.tag.family = jt.value("family", config.tag.family);
+        config.tag.family_mode = jt.value("family_mode", config.tag.family_mode);
+        config.tag.allowed_family = jt.value("allowed_family", config.tag.allowed_family);
         config.tag.allowed_id = jt.value("allowed_id", config.tag.allowed_id);
         config.tag.tag_size_units = jt.value("tag_size_units", config.tag.tag_size_units);
         config.tag.output_padding_units = jt.value("output_padding_units", config.tag.output_padding_units);
@@ -106,13 +186,16 @@ bool load_config(const std::string& path, AppConfig& config, std::string* error)
         const auto& jr = j.value("runtime", json::object());
         config.runtime.show_ui = jr.value("show_ui", config.runtime.show_ui);
         config.runtime.headless_deploy = jr.value("headless_deploy", config.runtime.headless_deploy);
+        config.runtime.probe_measure_frames = jr.value("probe_measure_frames", config.runtime.probe_measure_frames);
+        config.runtime.report_dir = jr.value("report_dir", config.runtime.report_dir);
 
         const auto& jcal = j.value("calibration", json::object());
         config.calibration.valid = jcal.value("valid", config.calibration.valid);
+        config.calibration.camera_mode_used = mode_from_json(jcal.value("camera_mode_used", json::object()), config.calibration.camera_mode_used);
         config.calibration.warped_width = jcal.value("warped_width", config.calibration.warped_width);
         config.calibration.warped_height = jcal.value("warped_height", config.calibration.warped_height);
-        config.calibration.red_roi = roi_from_json(jcal.value("red_roi", json::object()));
-        config.calibration.image_roi = roi_from_json(jcal.value("image_roi", json::object()));
+        config.calibration.red_roi_ratio = roi_from_json(jcal.value("red_roi_ratio", json::object()));
+        config.calibration.image_roi_ratio = roi_from_json(jcal.value("image_roi_ratio", json::object()));
         config.calibration.homography = homography_from_json(jcal.value("homography", json::array()));
 
         if (config.calibration.valid &&
@@ -122,6 +205,7 @@ bool load_config(const std::string& path, AppConfig& config, std::string* error)
         {
             config.calibration.valid = false;
         }
+
         return true;
     }
     catch (const std::exception& e)
@@ -137,31 +221,22 @@ bool save_config(const std::string& path, const AppConfig& config, std::string* 
     {
         json j;
         j["camera"] = {
-            {"index", config.camera.index},
-            {"width", config.camera.width},
-            {"height", config.camera.height},
-            {"fps", config.camera.fps},
-            {"backend", config.camera.backend},
-            {"prefer_mjpg", config.camera.prefer_mjpg},
+            {"device_index", config.camera.device_index},
+            {"device_path", config.camera.device_path},
+            {"backend", backend_to_string(config.camera.backend)},
+            {"requested_mode", mode_to_json(config.camera.requested_mode)},
             {"buffer_size", config.camera.buffer_size},
             {"warmup_frames", config.camera.warmup_frames},
             {"drop_frames_per_read", config.camera.drop_frames_per_read},
-            {"flip_horizontal", config.camera.flip_horizontal}
+            {"flip_horizontal", config.camera.flip_horizontal},
+            {"probe_candidates", json::array()}
         };
-
-        j["probe"] = {
-            {"camera_indices", config.probe.camera_indices},
-            {"widths", config.probe.widths},
-            {"heights", config.probe.heights},
-            {"fps_values", config.probe.fps_values},
-            {"backends", config.probe.backends},
-            {"warmup_frames", config.probe.warmup_frames},
-            {"measure_frames", config.probe.measure_frames},
-            {"report_dir", config.probe.report_dir}
-        };
+        for (const auto& mode : config.camera.probe_candidates)
+            j["camera"]["probe_candidates"].push_back(mode_to_json(mode));
 
         j["tag"] = {
-            {"family", config.tag.family},
+            {"family_mode", config.tag.family_mode},
+            {"allowed_family", config.tag.allowed_family},
             {"allowed_id", config.tag.allowed_id},
             {"tag_size_units", config.tag.tag_size_units},
             {"output_padding_units", config.tag.output_padding_units},
@@ -180,16 +255,19 @@ bool save_config(const std::string& path, const AppConfig& config, std::string* 
 
         j["runtime"] = {
             {"show_ui", config.runtime.show_ui},
-            {"headless_deploy", config.runtime.headless_deploy}
+            {"headless_deploy", config.runtime.headless_deploy},
+            {"probe_measure_frames", config.runtime.probe_measure_frames},
+            {"report_dir", config.runtime.report_dir}
         };
 
         j["calibration"] = {
             {"valid", config.calibration.valid},
+            {"camera_mode_used", mode_to_json(config.calibration.camera_mode_used)},
             {"warped_width", config.calibration.warped_width},
             {"warped_height", config.calibration.warped_height},
             {"homography", homography_to_json(config.calibration.homography)},
-            {"red_roi", roi_to_json(config.calibration.red_roi)},
-            {"image_roi", roi_to_json(config.calibration.image_roi)}
+            {"red_roi_ratio", roi_to_json(config.calibration.red_roi_ratio)},
+            {"image_roi_ratio", roi_to_json(config.calibration.image_roi_ratio)}
         };
 
         fs::path out_path(path);
@@ -209,19 +287,5 @@ bool save_config(const std::string& path, const AppConfig& config, std::string* 
     {
         if (error) *error = e.what();
         return false;
-    }
-}
-
-std::string backend_to_string(int backend)
-{
-    switch (backend)
-    {
-        case cv::CAP_ANY: return "CAP_ANY";
-        case cv::CAP_V4L2: return "CAP_V4L2";
-        case cv::CAP_GSTREAMER: return "CAP_GSTREAMER";
-        case cv::CAP_FFMPEG: return "CAP_FFMPEG";
-        case cv::CAP_DSHOW: return "CAP_DSHOW";
-        case cv::CAP_MSMF: return "CAP_MSMF";
-        default: return "BACKEND_" + std::to_string(backend);
     }
 }

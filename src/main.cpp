@@ -1,11 +1,12 @@
-#include "camera.h"
 #include "calibration.h"
+#include "camera.h"
 #include "config.h"
 #include "deploy.h"
 
+#include <cstdlib>
 #include <iostream>
-#include <string>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -19,18 +20,22 @@ struct CliOptions
     int width = -1;
     int height = -1;
     int fps = -1;
+    std::string fourcc;
+    std::string backend;
 };
 
 void print_help()
 {
     std::cout
-        << "Usage: camera_combo_vision_app <probe|calibrate|deploy> [options]\n"
+        << "Usage: vision_app <probe|calibrate|deploy> [options]\n"
         << "Options:\n"
         << "  --config PATH       Config file path\n"
         << "  --camera N          Override camera index\n"
         << "  --width N           Override width\n"
         << "  --height N          Override height\n"
         << "  --fps N             Override fps\n"
+        << "  --fourcc STR        Override FOURCC, e.g. MJPG\n"
+        << "  --backend NAME      Override backend, e.g. V4L2\n"
         << "  --show-ui           Force UI on\n"
         << "  --no-ui             Force UI off\n";
 }
@@ -61,6 +66,10 @@ bool parse_cli(int argc, char** argv, CliOptions& opts, std::string& error)
                 opts.height = std::stoi(require_value(arg));
             else if (arg == "--fps")
                 opts.fps = std::stoi(require_value(arg));
+            else if (arg == "--fourcc")
+                opts.fourcc = require_value(arg);
+            else if (arg == "--backend")
+                opts.backend = require_value(arg);
             else if (arg == "--show-ui")
                 opts.force_ui = true;
             else if (arg == "--no-ui")
@@ -82,19 +91,24 @@ bool parse_cli(int argc, char** argv, CliOptions& opts, std::string& error)
             return false;
         }
     }
+
     return true;
 }
 
 void apply_overrides(const CliOptions& cli, AppConfig& cfg)
 {
     if (cli.camera_index >= 0)
-        cfg.camera.index = cli.camera_index;
+        cfg.camera.device_index = cli.camera_index;
     if (cli.width > 0)
-        cfg.camera.width = cli.width;
+        cfg.camera.requested_mode.width = cli.width;
     if (cli.height > 0)
-        cfg.camera.height = cli.height;
+        cfg.camera.requested_mode.height = cli.height;
     if (cli.fps > 0)
-        cfg.camera.fps = cli.fps;
+        cfg.camera.requested_mode.fps = cli.fps;
+    if (!cli.fourcc.empty())
+        cfg.camera.requested_mode.fourcc = normalize_fourcc_string(cli.fourcc);
+    if (!cli.backend.empty())
+        cfg.camera.backend = backend_from_string(cli.backend);
     if (cli.force_ui)
     {
         cfg.runtime.show_ui = true;
@@ -114,7 +128,7 @@ int main(int argc, char** argv)
     std::string cli_error;
     if (!parse_cli(argc, argv, cli, cli_error))
     {
-        std::cerr << cli_error << "\n";
+        std::cerr << cli_error << '\n';
         print_help();
         return 1;
     }
@@ -123,7 +137,7 @@ int main(int argc, char** argv)
     std::string cfg_error;
     if (!load_config(cli.config_path, cfg, &cfg_error))
     {
-        std::cerr << "Config load failed: " << cfg_error << "\n";
+        std::cerr << "Config load failed: " << cfg_error << '\n';
         return 1;
     }
 
@@ -132,13 +146,14 @@ int main(int argc, char** argv)
     if (cli.mode == "probe")
     {
         const auto results = run_camera_probe(cfg);
-        std::string json_path, csv_path;
-        if (!write_probe_report(cfg.probe.report_dir, results, &json_path, &csv_path))
+        std::string json_path;
+        std::string csv_path;
+        if (!write_probe_report(cfg.runtime.report_dir, results, &json_path, &csv_path))
         {
             std::cerr << "Failed to write probe report\n";
             return 1;
         }
-        std::cout << "Probe report written:\n  JSON: " << json_path << "\n  CSV:  " << csv_path << "\n";
+        std::cout << "Probe report written:\n  JSON: " << json_path << "\n  CSV:  " << csv_path << '\n';
         return 0;
     }
 
@@ -147,10 +162,9 @@ int main(int argc, char** argv)
         std::string error;
         if (!run_calibration(cfg, cli.config_path, &error))
         {
-            std::cerr << "Calibration failed: " << error << "\n";
+            std::cerr << "Calibration failed: " << error << '\n';
             return 1;
         }
-        std::cout << "Calibration finished. Save with [S] during UI, or inspect updated config.\n";
         return 0;
     }
 
@@ -159,13 +173,13 @@ int main(int argc, char** argv)
         std::string error;
         if (!run_deploy(cfg, &error))
         {
-            std::cerr << "Deploy failed: " << error << "\n";
+            std::cerr << "Deploy failed: " << error << '\n';
             return 1;
         }
         return 0;
     }
 
-    std::cerr << "Unknown mode: " << cli.mode << "\n";
+    std::cerr << "Unknown mode: " << cli.mode << '\n';
     print_help();
     return 1;
 }
