@@ -104,12 +104,6 @@ struct AppOptions {
 inline void print_live_controls() {
     std::cout << R"TXT(
 === vision_app live controls ===
-Build every time with:
-  mkdir -p build
-  cd build
-  cmake ..
-  make -j$(nproc)
-
 Windows
   vision_app_camera : raw feed + tag overlay
   vision_app_warp   : warp preview + ROIs + white invalid area
@@ -127,47 +121,28 @@ Keys
   y             : save warp only
   o             : save rois only
   r             : reset rois
+  h             : show this help again
   q / ESC       : quit
 
-Status line example
-  CAM 640x480 MJPG @120 | TAG 36 id=0 | LOCK yes | WARP centered | TAG_SIZE 120mm
+Notes
+  - terminal output is event-only; no per-frame status spam
+  - use 640x480 for a meaningful warp preview
 )TXT" << std::flush;
 }
 
-inline void print_status_to_terminal(int cam_w,
-                                     int cam_h,
-                                     const std::string& fourcc,
-                                     int fps_req,
-                                     bool locked,
-                                     const AprilTagDetection& cur,
-                                     int selected,
-                                     double move_step,
-                                     double size_step,
-                                     double fill_ratio,
-                                     double tag_size_mm,
-                                     const RoiRuntimeData* roi_info,
-                                     const ModelResult* model_res) {
-    std::cout << "\rCAM " << cam_w << "x" << cam_h << " " << fourcc << " @" << fps_req
-              << " | TAG ";
-    if (cur.found) std::cout << cur.family << " id=" << cur.id;
-    else std::cout << "none";
-    std::cout << " | LOCK " << (locked ? "yes" : "no")
-              << " | WARP centered"
-              << " | TAG_SIZE " << static_cast<int>(std::lround(tag_size_mm)) << "mm"
-              << " | ROI " << (selected == 0 ? "red" : "image")
-              << " | mv " << move_step
-              << " sz " << size_step
-              << " fill " << fill_ratio;
-    if (roi_info) {
-        std::cout << " | red_ratio " << roi_info->red_ratio
-                  << " rv " << roi_info->red_valid_pixels
-                  << " iv " << roi_info->image_valid_pixels;
-    }
-    if (model_res && model_res->ran) {
-        std::cout << " | model " << model_res->summary;
-    }
-    std::cout << "        " << std::flush;
-}
+inline void print_status_to_terminal(int,
+                                     int,
+                                     const std::string&,
+                                     int,
+                                     bool,
+                                     const AprilTagDetection&,
+                                     int,
+                                     double,
+                                     double,
+                                     double,
+                                     double,
+                                     const RoiRuntimeData*,
+                                     const ModelResult*) {}
 
 inline cv::Mat make_blank_preview(int side, const std::string& text) {
     cv::Mat img(std::max(64, side), std::max(64, side), CV_8UC3, cv::Scalar(235,235,235));
@@ -332,7 +307,6 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
             last_print_tag = cur.id;
             last_print_family = cur.family;
         }
-        print_status_to_terminal(cam_w, cam_h, opt.fourcc, opt.fps, locked, cur, selected, move_step, size_step, opt.tag_fill_ratio, opt.tag_size_mm, locked ? &roi_info : nullptr, locked ? &model_res : nullptr);
 
         ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
@@ -357,12 +331,13 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
                 }
             }
         }
-        if (key == '1') selected = 0;
-        if (key == '2') selected = 1;
-        if (key == '[') move_step = std::max(0.001, move_step * 0.5);
-        if (key == ']') move_step = std::min(0.25, move_step * 2.0);
-        if (key == ',') size_step = std::max(0.001, size_step * 0.5);
-        if (key == '.') size_step = std::min(0.25, size_step * 2.0);
+        if (key == '1') { selected = 0; std::cout << "\n[roi] selected red_roi\n"; }
+        if (key == '2') { selected = 1; std::cout << "\n[roi] selected image_roi\n"; }
+        if (key == '[') { move_step = std::max(0.001, move_step * 0.5); std::cout << "\n[step] move_step=" << move_step << "\n"; }
+        if (key == ']') { move_step = std::min(0.25, move_step * 2.0); std::cout << "\n[step] move_step=" << move_step << "\n"; }
+        if (key == ',') { size_step = std::max(0.001, size_step * 0.5); std::cout << "\n[step] size_step=" << size_step << "\n"; }
+        if (key == '.') { size_step = std::min(0.25, size_step * 2.0); std::cout << "\n[step] size_step=" << size_step << "\n"; }
+        if (key == 'h') { print_live_controls(); }
         if (key == 'r') {
             rois = opt.default_rois;
             std::cout << "\n[roi] reset to defaults\n";
@@ -455,7 +430,6 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         warp_show = downscale_for_preview(warp_show, opt.warp_preview_max);
         cv::imshow("vision_app_camera", camera_show);
         cv::imshow("vision_app_warp", warp_show);
-        print_status_to_terminal(cam_w, cam_h, opt.fourcc, opt.fps, true, AprilTagDetection{true, pack.family, pack.id}, 1, 0.0, 0.0, pack.tag_fill_ratio, opt.tag_size_mm, &roi_info, &model_res);
         ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
         if (key == 27 || key == 'q') break;
