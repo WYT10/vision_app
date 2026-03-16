@@ -219,8 +219,10 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
     cv::Mat mapx(out_h, out_w, CV_32FC1), mapy(out_h, out_w, CV_32FC1), valid(out_h, out_w, CV_8UC1, cv::Scalar(0));
     for (int y = 0; y < out_h; ++y) {
         for (int x = 0; x < out_w; ++x) {
-            cv::Vec3d p = Hinv * cv::Vec3d(static_cast<double>(x), static_cast<double>(y), 1.0);
-            const double w = p[2];
+            cv::Matx33d M = Hinv;
+            cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
+            cv::Vec3d p = M * v;
+            double w = p[2];
             if (std::abs(w) < 1e-12) {
                 mapx.at<float>(y,x) = -1.0f; mapy.at<float>(y,x) = -1.0f; continue;
             }
