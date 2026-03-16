@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -26,10 +27,10 @@
 namespace vision_app {
 
 struct AprilTagConfig {
-    std::string family = "auto";          // auto | 16 | 25 | 36 | tag16h5 | tag25h9 | tag36h11
+    std::string family = "auto";          // auto | 16 | 25 | 36
     int target_id = 0;
     bool require_target_id = true;
-    bool manual_lock_only = false;         // when true, only Space/Enter can lock
+    bool manual_lock_only = false;
     int lock_frames = 8;
     double max_center_jitter_px = 3.0;
     double max_corner_jitter_px = 4.0;
@@ -56,9 +57,11 @@ struct HomographyLock {
     bool valid = false;
     std::string family = "";
     int id = -1;
-    cv::Size warp_size{1280, 720};
-    cv::Mat H;     // src->dst
-    cv::Mat Hinv;  // dst->src
+    cv::Size source_size{0, 0};
+    cv::Size tag_rect_size{720, 720};
+    cv::Size warp_size{720, 720};
+    cv::Mat H;     // src -> final displayed warped canvas
+    cv::Mat Hinv;  // final displayed warped canvas -> src
     std::array<cv::Point2f, 4> locked_corners{};
 };
 
@@ -81,6 +84,23 @@ struct RoiRatio {
 struct RoiSet {
     RoiRatio red_roi{0.05, 0.10, 0.20, 0.20};
     RoiRatio image_roi{0.30, 0.10, 0.50, 0.60};
+};
+
+struct RedGateResult {
+    bool valid = false;
+    bool triggered = false;
+    double mean_b = 0.0;
+    double mean_g = 0.0;
+    double mean_r = 0.0;
+    double red_score = 0.0;
+};
+
+struct InferStubResult {
+    bool valid = false;
+    double gray_mean = 0.0;
+    double gray_stddev = 0.0;
+    double edge_ratio = 0.0;
+    std::string summary;
 };
 
 static bool clamp_and_validate_roi(RoiRatio& roi) {
@@ -111,10 +131,11 @@ static cv::Rect ratio_to_rect(const RoiRatio& roi, const cv::Size& image_size) {
 static cv::Mat crop_roi_clone(const cv::Mat& img, const RoiRatio& roi) {
     if (img.empty()) return {};
     const cv::Rect r = ratio_to_rect(roi, img.size());
+    if (r.width <= 0 || r.height <= 0) return {};
     return img(r).clone();
 }
 
-static std::array<cv::Point2f, 4> make_warp_quad(const cv::Size& size) {
+static std::array<cv::Point2f, 4> make_tag_rect_quad(const cv::Size& size) {
     return {
         cv::Point2f(0.0f, 0.0f),
         cv::Point2f(static_cast<float>(size.width - 1), 0.0f),
@@ -284,22 +305,88 @@ private:
     AprilTagDetection last_candidate_{};
 };
 
-static bool compute_homography_from_tag_quad(const AprilTagDetection& det,
-                                             const cv::Size& warp_size,
-                                             HomographyLock& out) {
-    if (!det.found || warp_size.width <= 0 || warp_size.height <= 0) return false;
+static cv::Mat matx_to_mat(const cv::Matx33d& M) {
+    cv::Mat out(3, 3, CV_64F);
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out.at<double>(r, c) = M(r, c);
+    return out;
+}
+
+static cv::Matx33d mat_to_matx(const cv::Mat& m) {
+    cv::Matx33d out{};
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out(r, c) = m.at<double>(r, c);
+    return out;
+}
+
+static bool compute_full_view_homography_from_tag_quad(const AprilTagDetection& det,
+                                                       const cv::Size& source_size,
+                                                       const cv::Size& tag_rect_size,
+                                                       int max_view_long_side,
+                                                       HomographyLock& out) {
+    if (!det.found || source_size.width <= 0 || source_size.height <= 0) return false;
+    if (tag_rect_size.width <= 0 || tag_rect_size.height <= 0) return false;
+
     std::vector<cv::Point2f> src(4), dst(4);
     for (int i = 0; i < 4; ++i) src[i] = det.corners[i];
-    const auto quad = make_warp_quad(warp_size);
+    const auto quad = make_tag_rect_quad(tag_rect_size);
     for (int i = 0; i < 4; ++i) dst[i] = quad[i];
-    cv::Mat H = cv::getPerspectiveTransform(src, dst);
-    if (H.empty()) return false;
+
+    cv::Mat H_base = cv::getPerspectiveTransform(src, dst);
+    if (H_base.empty()) return false;
+
+    std::vector<cv::Point2f> frame_corners = {
+        {0.0f, 0.0f},
+        {static_cast<float>(source_size.width - 1), 0.0f},
+        {static_cast<float>(source_size.width - 1), static_cast<float>(source_size.height - 1)},
+        {0.0f, static_cast<float>(source_size.height - 1)}
+    };
+    std::vector<cv::Point2f> warped_frame_corners;
+    cv::perspectiveTransform(frame_corners, warped_frame_corners, H_base);
+    if (warped_frame_corners.size() != 4) return false;
+
+    double min_x = std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    for (const auto& p : warped_frame_corners) {
+        min_x = std::min(min_x, static_cast<double>(p.x));
+        min_y = std::min(min_y, static_cast<double>(p.y));
+        max_x = std::max(max_x, static_cast<double>(p.x));
+        max_y = std::max(max_y, static_cast<double>(p.y));
+    }
+
+    if (!(max_x > min_x) || !(max_y > min_y)) return false;
+
+    cv::Matx33d M_base = mat_to_matx(H_base);
+    cv::Matx33d T(1.0, 0.0, -min_x,
+                  0.0, 1.0, -min_y,
+                  0.0, 0.0, 1.0);
+    cv::Matx33d H_view = T * M_base;
+
+    int out_w = std::max(1, static_cast<int>(std::ceil(max_x - min_x)));
+    int out_h = std::max(1, static_cast<int>(std::ceil(max_y - min_y)));
+
+    if (max_view_long_side > 0) {
+        const int long_side = std::max(out_w, out_h);
+        if (long_side > max_view_long_side) {
+            const double scale = static_cast<double>(max_view_long_side) / static_cast<double>(long_side);
+            cv::Matx33d S(scale, 0.0, 0.0,
+                          0.0, scale, 0.0,
+                          0.0, 0.0, 1.0);
+            H_view = S * H_view;
+            out_w = std::max(1, static_cast<int>(std::ceil(out_w * scale)));
+            out_h = std::max(1, static_cast<int>(std::ceil(out_h * scale)));
+        }
+    }
+
+    out = {};
     out.valid = true;
     out.family = det.family;
     out.id = det.id;
-    out.warp_size = warp_size;
-    out.H = H.clone();
-    out.Hinv = H.inv();
+    out.source_size = source_size;
+    out.tag_rect_size = tag_rect_size;
+    out.warp_size = cv::Size(out_w, out_h);
+    out.H = matx_to_mat(H_view);
+    out.Hinv = out.H.inv();
     out.locked_corners = det.corners;
     return !out.H.empty() && !out.Hinv.empty();
 }
@@ -309,7 +396,6 @@ static bool warp_full_frame(const cv::Mat& src, cv::Mat& dst, const HomographyLo
     cv::warpPerspective(src, dst, lock.H, lock.warp_size, interp, cv::BORDER_CONSTANT);
     return !dst.empty();
 }
-
 
 static bool build_warp_remap_cache(const HomographyLock& lock,
                                    const cv::Size& source_size,
@@ -321,12 +407,7 @@ static bool build_warp_remap_cache(const HomographyLock& lock,
 
     cv::Mat map_x(lock.warp_size, CV_32FC1);
     cv::Mat map_y(lock.warp_size, CV_32FC1);
-    cv::Matx33d M{};
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            M(r, c) = lock.Hinv.at<double>(r, c);
-        }
-    }
+    cv::Matx33d M = mat_to_matx(lock.Hinv);
 
     for (int y = 0; y < lock.warp_size.height; ++y) {
         float* mx = map_x.ptr<float>(y);
@@ -350,9 +431,8 @@ static bool build_warp_remap_cache(const HomographyLock& lock,
     cache.fixed_point = fixed_point;
     cache.source_size = source_size;
     cache.warp_size = lock.warp_size;
-    if (fixed_point) {
-        cv::convertMaps(map_x, map_y, cache.map1, cache.map2, CV_16SC2);
-    } else {
+    if (fixed_point) cv::convertMaps(map_x, map_y, cache.map1, cache.map2, CV_16SC2);
+    else {
         cache.map1 = map_x;
         cache.map2 = map_y;
     }
@@ -417,15 +497,52 @@ static bool load_warp_remap_cache(const std::string& path, WarpRemapCache& cache
     return true;
 }
 
+static RedGateResult evaluate_red_gate(const cv::Mat& red_roi_bgr,
+                                       double red_mean_threshold,
+                                       double red_dominance_threshold) {
+    RedGateResult out{};
+    if (red_roi_bgr.empty() || red_roi_bgr.channels() != 3) return out;
+    const cv::Scalar mean_bgr = cv::mean(red_roi_bgr);
+    out.valid = true;
+    out.mean_b = mean_bgr[0];
+    out.mean_g = mean_bgr[1];
+    out.mean_r = mean_bgr[2];
+    out.red_score = out.mean_r - std::max(out.mean_b, out.mean_g);
+    out.triggered = (out.mean_r >= red_mean_threshold) && (out.red_score >= red_dominance_threshold);
+    return out;
+}
+
+static InferStubResult run_infer_stub(const cv::Mat& image_roi_bgr) {
+    InferStubResult out{};
+    if (image_roi_bgr.empty()) return out;
+    cv::Mat gray;
+    if (image_roi_bgr.channels() == 1) gray = image_roi_bgr;
+    else cv::cvtColor(image_roi_bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::Scalar mean_v, std_v;
+    cv::meanStdDev(gray, mean_v, std_v);
+    cv::Mat edges;
+    cv::Canny(gray, edges, 60.0, 120.0);
+    const double edge_pixels = static_cast<double>(cv::countNonZero(edges));
+    const double total_pixels = std::max(1.0, static_cast<double>(gray.total()));
+    out.valid = true;
+    out.gray_mean = mean_v[0];
+    out.gray_stddev = std_v[0];
+    out.edge_ratio = edge_pixels / total_pixels;
+    std::ostringstream oss;
+    oss << "infer_stub gray_mean=" << std::fixed << std::setprecision(1) << out.gray_mean
+        << " std=" << out.gray_stddev
+        << " edge_ratio=" << out.edge_ratio;
+    out.summary = oss.str();
+    return out;
+}
+
 static void draw_detection_overlay(cv::Mat& frame, const AprilTagDetection& det, bool locked) {
     if (!det.found) {
         cv::putText(frame, "AprilTag: not found", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0, 0, 255}, 2);
         return;
     }
     const cv::Scalar color = locked ? cv::Scalar(0,255,0) : cv::Scalar(0,255,255);
-    for (int i = 0; i < 4; ++i) {
-        cv::line(frame, det.corners[i], det.corners[(i + 1) % 4], color, 2);
-    }
+    for (int i = 0; i < 4; ++i) cv::line(frame, det.corners[i], det.corners[(i + 1) % 4], color, 2);
     cv::circle(frame, det.center, 4, {255, 0, 255}, -1);
     std::ostringstream oss;
     oss << det.family << " id=" << det.id;
@@ -433,7 +550,12 @@ static void draw_detection_overlay(cv::Mat& frame, const AprilTagDetection& det,
     cv::putText(frame, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
 }
 
-static void draw_roi_overlay(cv::Mat& warped, const RoiSet& rois, const HomographyLock& lock, char selected_roi = '1') {
+static void draw_roi_overlay(cv::Mat& warped,
+                             const RoiSet& rois,
+                             const HomographyLock& lock,
+                             char selected_roi = '1',
+                             const RedGateResult* gate = nullptr,
+                             const InferStubResult* infer = nullptr) {
     const cv::Rect rr = ratio_to_rect(rois.red_roi, warped.size());
     const cv::Rect ir = ratio_to_rect(rois.image_roi, warped.size());
     const int red_thick = (selected_roi == '1') ? 3 : 2;
@@ -443,8 +565,19 @@ static void draw_roi_overlay(cv::Mat& warped, const RoiSet& rois, const Homograp
     cv::rectangle(warped, ir, {255,0,0}, img_thick);
     cv::putText(warped, "image_roi", ir.tl() + cv::Point(4, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, {255,0,0}, 2);
     std::ostringstream oss;
-    oss << "Warp lock: " << lock.family << " id=" << lock.id;
-    cv::putText(warped, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.75, {0,255,0}, 2);
+    oss << "Warp lock: " << lock.family << " id=" << lock.id << "  canvas=" << lock.warp_size.width << "x" << lock.warp_size.height;
+    cv::putText(warped, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {0,255,0}, 2);
+    if (gate && gate->valid) {
+        std::ostringstream gs;
+        gs << "red_mean=" << std::fixed << std::setprecision(1) << gate->mean_r
+           << " red_score=" << gate->red_score
+           << " gate=" << (gate->triggered ? "TRIGGER" : "idle");
+        cv::putText(warped, gs.str(), {20, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.58,
+                    gate->triggered ? cv::Scalar(0,255,255) : cv::Scalar(220,220,220), 2);
+    }
+    if (infer && infer->valid) {
+        cv::putText(warped, infer->summary, {20, 82}, cv::FONT_HERSHEY_SIMPLEX, 0.52, {255,255,255}, 1);
+    }
 }
 
 static bool save_homography_json(const std::string& path, const HomographyLock& lock) {
@@ -457,6 +590,10 @@ static bool save_homography_json(const std::string& path, const HomographyLock& 
     out << "  \"valid\": true,\n";
     out << "  \"family\": \"" << lock.family << "\",\n";
     out << "  \"id\": " << lock.id << ",\n";
+    out << "  \"source_width\": " << lock.source_size.width << ",\n";
+    out << "  \"source_height\": " << lock.source_size.height << ",\n";
+    out << "  \"tag_rect_width\": " << lock.tag_rect_size.width << ",\n";
+    out << "  \"tag_rect_height\": " << lock.tag_rect_size.height << ",\n";
     out << "  \"warp_width\": " << lock.warp_size.width << ",\n";
     out << "  \"warp_height\": " << lock.warp_size.height << ",\n";
     out << "  \"H\": [\n";
@@ -505,17 +642,6 @@ static bool extract_named_double(const std::string& s, const std::string& sectio
     return extract_double_after(s, k + key.size(), value);
 }
 
-[[maybe_unused]] static bool extract_named_int(const std::string& s, const std::string& key, int& value) {
-    double d = 0.0;
-    if (!extract_named_double(s, key, key, d)) {
-        size_t pos = s.find(key);
-        if (pos == std::string::npos) return false;
-        if (!extract_double_after(s, pos + key.size(), d)) return false;
-    }
-    value = static_cast<int>(std::lround(d));
-    return true;
-}
-
 static bool load_homography_json(const std::string& path, HomographyLock& lock) {
     std::ifstream in(path);
     if (!in.is_open()) return false;
@@ -523,24 +649,23 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
     ss << in.rdbuf();
     const std::string s = ss.str();
 
-    int w = 0, h = 0, id = -1;
-    size_t pw = s.find("\"warp_width\"");
-    size_t ph = s.find("\"warp_height\"");
-    size_t pi = s.find("\"id\"");
-    if (pw == std::string::npos || ph == std::string::npos || pi == std::string::npos) return false;
-    double tmp = 0.0;
-    if (!extract_double_after(s, pw, tmp)) {
-        return false;
-    }
-    w = static_cast<int>(std::lround(tmp));
-    if (!extract_double_after(s, ph, tmp)) {
-        return false;
-    }
-    h = static_cast<int>(std::lround(tmp));
-    if (!extract_double_after(s, pi, tmp)) {
-        return false;
-    }
-    id = static_cast<int>(std::lround(tmp));
+    auto get_int_named = [&](const char* key, int& out_v) -> bool {
+        size_t p = s.find(key);
+        double tmp = 0.0;
+        if (p == std::string::npos) return false;
+        if (!extract_double_after(s, p, tmp)) return false;
+        out_v = static_cast<int>(std::lround(tmp));
+        return true;
+    };
+
+    int src_w = 0, src_h = 0, tag_w = 0, tag_h = 0, w = 0, h = 0, id = -1;
+    if (!get_int_named("\"warp_width\"", w)) return false;
+    if (!get_int_named("\"warp_height\"", h)) return false;
+    if (!get_int_named("\"id\"", id)) return false;
+    get_int_named("\"source_width\"", src_w);
+    get_int_named("\"source_height\"", src_h);
+    get_int_named("\"tag_rect_width\"", tag_w);
+    get_int_named("\"tag_rect_height\"", tag_h);
 
     size_t pf = s.find("\"family\"");
     std::string family;
@@ -548,9 +673,7 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
         size_t colon = s.find(':', pf);
         size_t q1 = (colon == std::string::npos) ? std::string::npos : s.find('"', colon + 1);
         size_t q2 = (q1 == std::string::npos) ? std::string::npos : s.find('"', q1 + 1);
-        if (q1 != std::string::npos && q2 != std::string::npos) {
-            family = s.substr(q1 + 1, q2 - q1 - 1);
-        }
+        if (q1 != std::string::npos && q2 != std::string::npos) family = s.substr(q1 + 1, q2 - q1 - 1);
     }
 
     std::vector<double> vals;
@@ -572,6 +695,8 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
     lock.valid = true;
     lock.family = family;
     lock.id = id;
+    lock.source_size = cv::Size(src_w, src_h);
+    lock.tag_rect_size = cv::Size(tag_w, tag_h);
     lock.warp_size = cv::Size(w, h);
     lock.H = H.clone();
     lock.Hinv = H.inv();

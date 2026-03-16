@@ -73,12 +73,11 @@ static bool load_config_file(const std::string& path,
         else if (key == "max_center_jitter_px") tag.max_center_jitter_px = std::stod(val);
         else if (key == "max_corner_jitter_px") tag.max_corner_jitter_px = std::stod(val);
         else if (key == "min_quad_area_ratio") tag.min_quad_area_ratio = std::stod(val);
-        else if (key == "threads") tag.threads = std::stoi(val);
-        else if (key == "decimate") tag.decimate = std::stof(val);
-        else if (key == "blur_sigma") tag.blur_sigma = std::stof(val);
-        else if (key == "refine_edges") tag.refine_edges = parse_bool(val);
         else if (key == "warp_width") dep.warp_width = std::stoi(val);
         else if (key == "warp_height") dep.warp_height = std::stoi(val);
+        else if (key == "warp_view_max_side") dep.warp_view_max_side = std::stoi(val);
+        else if (key == "interactive_max_side") dep.interactive_max_side = std::stoi(val);
+        else if (key == "unsafe_big_frame") dep.unsafe_big_frame = parse_bool(val);
         else if (key == "save_probe_csv") dep.save_probe_csv = val;
         else if (key == "save_test_csv") dep.save_test_csv = val;
         else if (key == "save_report_md") dep.save_report_md = val;
@@ -94,7 +93,6 @@ static bool load_config_file(const std::string& path,
         else if (key == "auto_save_lock") dep.auto_save_lock = parse_bool(val);
         else if (key == "live_preview_raw") dep.live_preview_raw = parse_bool(val);
         else if (key == "live_preview_warp") dep.live_preview_warp = parse_bool(val);
-        else if (key == "show_roi_crops") dep.show_roi_crops = parse_bool(val);
         else if (key == "show_help_overlay") dep.show_help_overlay = parse_bool(val);
         else if (key == "show_status_overlay") dep.show_status_overlay = parse_bool(val);
         else if (key == "use_remap_cache") dep.use_remap_cache = parse_bool(val);
@@ -104,6 +102,10 @@ static bool load_config_file(const std::string& path,
         else if (key == "snapshot_dir") dep.snapshot_dir = val;
         else if (key == "move_step") dep.move_step = std::stod(val);
         else if (key == "size_step") dep.size_step = std::stod(val);
+        else if (key == "red_mean_threshold") dep.red_mean_threshold = std::stod(val);
+        else if (key == "red_dominance_threshold") dep.red_dominance_threshold = std::stod(val);
+        else if (key == "trigger_cooldown_frames") dep.trigger_cooldown_frames = std::stoi(val);
+        else if (key == "save_triggered_image_roi") dep.save_triggered_image_roi = parse_bool(val);
         else if (key == "red_roi") parse_roi_ratio_arg(val, rois.red_roi);
         else if (key == "image_roi") parse_roi_ratio_arg(val, rois.image_roi);
     }
@@ -122,7 +124,14 @@ static void print_general_help() {
         << "  --config PATH                Load config file first\n"
         << "  --help-mode probe|bench|live|deploy\n"
         << "  --tag-family auto|16|25|36  AprilTag family search mode\n"
-        << "\nExamples:\n"
+        << "  --warp-width N              Tag rect width used when rectifying the tag quad\n"
+        << "  --warp-height N             Tag rect height used when rectifying the tag quad\n"
+        << "  --warp-view-max-side N      Max long side for the final full warped preview canvas\n"
+        << "  --interactive-max-side N    Safety guard for live/deploy requested camera size\n"
+        << "  --unsafe-big-frame 0|1      Override the live/deploy camera safety cap\n"
+        << "  --red-mean-threshold X      Gate threshold on mean red in red_roi\n"
+        << "  --red-dominance-threshold X Gate threshold on red - max(blue,green)\n\n"
+        << "Examples:\n"
         << "  ./vision_app --mode probe\n"
         << "  ./vision_app --help-mode live\n"
         << "  ./vision_app --mode live --tag-family auto --target-id 0\n\n";
@@ -166,65 +175,59 @@ static void print_live_help() {
     std::cout
         << "Mode: live\n"
         << "Purpose:\n"
-        << "  Search for an AprilTag, show family/id live, lock the tag, compute homography from the\n"
-        << "  tag quadrilateral itself, then warp the full frame. After lock, edit ratio-based rois with keys only.\n\n"
+        << "  Search for an AprilTag, show family/id live, lock the tag, compute the homography from the\n"
+        << "  tag quadrilateral itself, then derive a translated/scaled full-view warped preview so the\n"
+        << "  entire transformed camera frame is visible in one canvas. After lock, edit ratio-based ROIs\n"
+        << "  with keys only. Save H/remap/rois for later deploy.\n\n"
         << "Important camera arguments:\n"
         << "  --device /dev/video0\n"
         << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
-        << "  --latest-only 0|1 --drain-grabs N --buffer-size N\n\n"
+        << "  --latest-only 0|1 --drain-grabs N --buffer-size N\n"
+        << "  --interactive-max-side N    Reject larger interactive inputs unless --unsafe-big-frame 1\n\n"
         << "Important tag arguments:\n"
         << "  --tag-family auto|16|25|36  auto tries 36 -> 25 -> 16 and uses the best visible match\n"
         << "  --target-id N               Desired tag id\n"
         << "  --require-target-id 0|1     When 1, ignore tags with different ids\n"
         << "  --manual-lock-only 0|1      When 1, never auto-lock; you press space/enter to lock\n"
-        << "  --lock-frames N             Stable frames required before auto-lock\n"
-        << "  --max-center-jitter X       Allowed center motion during locking\n"
-        << "  --max-corner-jitter X       Allowed corner motion during locking\n"
-        << "  --min-quad-area-ratio X     Minimum visible tag area ratio before lock is allowed\n\n"
+        << "  --lock-frames N             Stable frames required before auto-lock\n\n"
         << "Warp and ROI arguments:\n"
-        << "  --warp-width N --warp-height N\n"
-        << "  --warp-square N             Convenience alias to set both warp width and height to N\n"
-        << "  --red-roi x,y,w,h           Ratio roi in warped coordinates\n"
-        << "  --image-roi x,y,w,h         Ratio roi in warped coordinates\n"
-        << "  --move-step X               Keyboard move step for roi editing\n"
-        << "  --size-step X               Keyboard size step for roi editing\n"
-        << "  --auto-save-lock 0|1        Save H/rois immediately after locking\n"
-        << "  --use-remap-cache 0|1       Precompute remap maps and use cv::remap() for warp\n"
-        << "  --fixed-point-remap 0|1     Store remap maps in compact fixed-point form\n"
-        << "  --save-remap-cache 0|1      Persist remap cache after build/lock\n"
-        << "  --save-h PATH --save-rois PATH --save-remap PATH --save-report-md PATH\n\n"
-        << "Preview arguments:\n"
-        << "  --live-preview-raw 0|1\n"
-        << "  --live-preview-warp 0|1\n"
-        << "  --show-roi-crops 0|1\n"
-        << "  --show-help-overlay 0|1\n"
-        << "  --save-snapshots 0|1 --snapshot-dir PATH\n\n"
-        << "Interaction:\n"
-        << "  q/ESC quit | space/enter lock | u unlock | p save all | y save H | o save rois | g save remap\n"
-        << "  1/2 or TAB select roi | wasd move | ijkl resize | [ ] move step | , . size step\n"
-        << "  h toggle help overlay | r reset rois | c save warped snapshot\n\n"
+        << "  --warp-width N              Target width of the tag rectangle before full-view bbox is computed\n"
+        << "  --warp-height N             Target height of the tag rectangle before full-view bbox is computed\n"
+        << "  --warp-view-max-side N      Downscale the final warped preview if its long side exceeds this value\n"
+        << "  --red-roi x,y,w,h           Ratio-based roi in the final warped preview\n"
+        << "  --image-roi x,y,w,h         Ratio-based roi in the final warped preview\n"
+        << "  --move-step X --size-step X Keyboard nudge steps for roi editing\n\n"
+        << "Deploy-gate arguments already active in live preview:\n"
+        << "  --red-mean-threshold X      Trigger when red_roi mean red channel exceeds X\n"
+        << "  --red-dominance-threshold X Trigger when red - max(blue,green) exceeds X\n"
+        << "  --trigger-cooldown N        Frames to wait after one trigger before allowing the next\n"
+        << "  --save-triggered-image-roi  Save image_roi snapshots when gate triggers\n\n"
+        << "Key flow:\n"
+        << "  raw preview -> tag found -> press space to lock -> full warped preview -> select ROIs -> save\n\n"
         << "Good start:\n"
-        << "  ./vision_app --mode live --tag-family auto --target-id 0 --width 1280 --height 720 --fps 30 --fourcc MJPG --warp-square 720\n\n";
+        << "  ./vision_app --mode live --width 1280 --height 720 --fps 30 --fourcc MJPG --tag-family auto --target-id 0 --manual-lock-only 1 --warp-width 720 --warp-height 720 --warp-view-max-side 900\n\n";
 }
 
 static void print_deploy_help() {
     std::cout
         << "Mode: deploy\n"
         << "Purpose:\n"
-        << "  Load a saved homography and saved rois, skip acquisition, and immediately run the full-frame warp.\n"
-        << "  Use this after calibration when the camera and plane geometry stay fixed.\n\n"
+        << "  Load a saved full-view homography/remap cache and saved ratio ROIs. Warp every new frame into\n"
+        << "  the same calibrated warped-preview canvas. Evaluate red_roi first. If the red gate passes,\n"
+        << "  extract image_roi and pass it to the built-in infer stub (placeholder for your real model).\n\n"
         << "Important arguments:\n"
-        << "  --load-h PATH               Saved homography json from live mode\n"
-        << "  --load-rois PATH            Saved roi json from live mode\n"
-        << "  --load-remap PATH           Saved remap cache for fast warp startup\n"
-        << "  --device /dev/video0\n"
-        << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
-        << "  --latest-only 0|1 --drain-grabs N\n"
-        << "  --live-preview-raw 0|1 --live-preview-warp 0|1\n"
-        << "  --show-roi-crops 0|1\n"
-        << "  --use-remap-cache 0|1 --fixed-point-remap 0|1 --load-remap PATH\n\n"
-        << "Example:\n"
-        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json --load-remap ../report/warp_remap.yml.gz --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
+        << "  --load-h PATH               Load saved full-view homography json\n"
+        << "  --load-rois PATH            Load ratio ROIs\n"
+        << "  --load-remap PATH           Load precomputed remap cache for faster warp\n"
+        << "  --use-remap-cache 0|1       Use remap instead of warpPerspective at runtime\n"
+        << "  --red-mean-threshold X\n"
+        << "  --red-dominance-threshold X\n"
+        << "  --trigger-cooldown N\n"
+        << "  --save-triggered-image-roi  Save image_roi snapshots when gate triggers\n\n"
+        << "This version does not yet load a real model. Instead, it runs a lightweight inference stub\n"
+        << "on image_roi (mean gray, stddev, edge ratio) so you can verify end-to-end gating and ROI extraction.\n\n"
+        << "Good start:\n"
+        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json --load-remap ../report/warp_remap.yml.gz --use-remap-cache 1 --red-mean-threshold 120 --red-dominance-threshold 20\n\n";
 }
 
 static void print_help_mode(const std::string& mode) {
@@ -301,6 +304,9 @@ int main(int argc, char** argv) {
             else if (a == "--warp-width") dep.warp_width = std::stoi(need("--warp-width"));
             else if (a == "--warp-height") dep.warp_height = std::stoi(need("--warp-height"));
             else if (a == "--warp-square") { int n = std::stoi(need("--warp-square")); dep.warp_width = n; dep.warp_height = n; }
+            else if (a == "--warp-view-max-side") dep.warp_view_max_side = std::stoi(need("--warp-view-max-side"));
+            else if (a == "--interactive-max-side") dep.interactive_max_side = std::stoi(need("--interactive-max-side"));
+            else if (a == "--unsafe-big-frame") dep.unsafe_big_frame = parse_bool(need("--unsafe-big-frame"));
             else if (a == "--red-roi") { if (!parse_roi_ratio_arg(need("--red-roi"), rois.red_roi)) throw std::runtime_error("bad --red-roi"); }
             else if (a == "--image-roi") { if (!parse_roi_ratio_arg(need("--image-roi"), rois.image_roi)) throw std::runtime_error("bad --image-roi"); }
             else if (a == "--save-h") dep.save_h_path = need("--save-h");
@@ -315,7 +321,6 @@ int main(int argc, char** argv) {
             else if (a == "--auto-save-lock") dep.auto_save_lock = parse_bool(need("--auto-save-lock"));
             else if (a == "--live-preview-raw") dep.live_preview_raw = parse_bool(need("--live-preview-raw"));
             else if (a == "--live-preview-warp") dep.live_preview_warp = parse_bool(need("--live-preview-warp"));
-            else if (a == "--show-roi-crops") dep.show_roi_crops = parse_bool(need("--show-roi-crops"));
             else if (a == "--show-help-overlay") dep.show_help_overlay = parse_bool(need("--show-help-overlay"));
             else if (a == "--show-status-overlay") dep.show_status_overlay = parse_bool(need("--show-status-overlay"));
             else if (a == "--use-remap-cache") dep.use_remap_cache = parse_bool(need("--use-remap-cache"));
@@ -325,6 +330,10 @@ int main(int argc, char** argv) {
             else if (a == "--snapshot-dir") dep.snapshot_dir = need("--snapshot-dir");
             else if (a == "--move-step") dep.move_step = std::stod(need("--move-step"));
             else if (a == "--size-step") dep.size_step = std::stod(need("--size-step"));
+            else if (a == "--red-mean-threshold") dep.red_mean_threshold = std::stod(need("--red-mean-threshold"));
+            else if (a == "--red-dominance-threshold") dep.red_dominance_threshold = std::stod(need("--red-dominance-threshold"));
+            else if (a == "--trigger-cooldown") dep.trigger_cooldown_frames = std::stoi(need("--trigger-cooldown"));
+            else if (a == "--save-triggered-image-roi") dep.save_triggered_image_roi = parse_bool(need("--save-triggered-image-roi"));
             else throw std::runtime_error("unknown argument: " + a);
         } catch (const std::exception& e) {
             std::cerr << "Argument error: " << e.what() << "\n\n";
@@ -340,11 +349,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         print_probe_result(probe);
-        if (!write_probe_csv(dep.save_probe_csv, probe)) {
-            std::cerr << "Warning: failed to write probe CSV: " << dep.save_probe_csv << "\n";
-        } else {
-            std::cout << "Probe CSV: " << dep.save_probe_csv << "\n";
-        }
+        if (!write_probe_csv(dep.save_probe_csv, probe)) std::cerr << "Warning: failed to write probe CSV: " << dep.save_probe_csv << "\n";
+        else std::cout << "Probe CSV: " << dep.save_probe_csv << "\n";
         return 0;
     }
 
