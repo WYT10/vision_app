@@ -1,123 +1,36 @@
-# Portable image-classification inference bundle (ONNX + NCNN)
+# Portable Classifier Inference Bundle v4
 
-This bundle is a small C++17 project for running your exported **Ultralytics classification** model on desktop or edge targets.
+This bundle gives you one C++ executable that can run either:
+- ONNX Runtime (`--backend onnx`)
+- NCNN (`--backend ncnn`)
 
-It includes:
+It also adds benchmarking helpers so you can compare:
+- top-1 accuracy on `train/`, `val/`, `test/`
+- end-to-end throughput (`img/s`, `ms/img`)
+- repeated single-image latency without disk I/O noise
 
-- `src/onnx_classifier.hpp` — ONNX Runtime backend
-- `src/ncnn_classifier.hpp` — NCNN backend
-- `src/main.cpp` — CLI for single-image or folder inference
-- `cmake/FindONNXRuntime.cmake` — helper for locating a prebuilt ONNX Runtime package
-- `CMakeLists.txt` — cross-platform build entry point
+## Folder layout
 
-## What this is for
+- `src/` — C++ source
+- `cmake/` — `FindONNXRuntime.cmake`
+- `tools/compare_backends.py` — helper to benchmark ONNX vs NCNN over dataset splits
 
-Use it after you already have:
-
-- `best.onnx`
-- `best.param`
-- `best.bin`
-- `labels.txt`
-
-Training on a GPU desktop does **not** prevent deployment to CPU-only boards. The deployment target only needs a runtime that can execute the exported model.
-
-## Preprocessing defaults
-
-The default CLI preprocessing is:
-
-- `--prep crop`
-- RGB conversion
-- `mean = 0,0,0`
-- `norm = 1/255,1/255,1/255`
-
-That matches current Ultralytics classify inference much more closely than a raw stretch path.
-
-If you retrained with a custom resize-only pipeline, switch to:
-
-- `--prep stretch`
-
-### Summary of modes
-
-- `crop` — center-crop largest square, then resize to `imgsz`
-- `stretch` — direct resize to `imgsz x imgsz`
-- `letterbox` — pad to square, then resize
-
-## Project tree
-
-```text
-portable_cls_infer_bundle/
-├─ CMakeLists.txt
-├─ README.md
-├─ cmake/
-│  └─ FindONNXRuntime.cmake
-└─ src/
-   ├─ classifier_common.hpp
-   ├─ onnx_classifier.hpp
-   ├─ ncnn_classifier.hpp
-   └─ main.cpp
-```
-
-## Build dependencies
-
-### Common
-
-- CMake >= 3.16
-- C++17 compiler
-- OpenCV (`core`, `imgproc`, `imgcodecs`)
-
-### ONNX backend
-
-You need a prebuilt ONNX Runtime C/C++ package or your own build.
-Point CMake at it with:
-
-- `-DONNXRUNTIME_ROOT=/path/to/onnxruntime`
-
-The folder should contain something like:
-
-```text
-onnxruntime/
-├─ include/
-│  └─ onnxruntime_cxx_api.h
-└─ lib/
-   └─ onnxruntime.lib / libonnxruntime.so
-```
-
-### NCNN backend
-
-Build/install NCNN first, then point CMake at the directory containing `ncnnConfig.cmake`:
-
-- `-Dncnn_DIR=/path/to/ncnn/install/lib/cmake/ncnn`
-
-## Configure and build
-
-### Desktop build with both backends
+## Build
 
 ```bash
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_ONNX_RUNTIME=ON \
-  -DENABLE_NCNN=ON \
-  -DONNXRUNTIME_ROOT=/path/to/onnxruntime \
-  -Dncnn_DIR=/path/to/ncnn/install/lib/cmake/ncnn
-
-cmake --build build --config Release
+mkdir -p build
+cd build
+cmake ..
+make -j$(nproc)
 ```
 
-### Raspberry Pi / CPU-only board (NCNN only)
+If NCNN is not globally discoverable, set either:
+- `CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install`
+- or `ncnn_DIR=/home/pi/ncnn/build/install/lib/cmake/ncnn`
 
-```bash
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_ONNX_RUNTIME=OFF \
-  -DENABLE_NCNN=ON \
-  -Dncnn_DIR=/home/pi/ncnn/build/install/lib/cmake/ncnn
+## Single image run
 
-cmake --build build -j4
-```
-
-## Running the CLI
-
-### ONNX single image
+### ONNX
 
 ```bash
 ./portable_cls_infer \
@@ -128,88 +41,82 @@ cmake --build build -j4
   --prep crop
 ```
 
-### NCNN single image
+### NCNN
 
 ```bash
 ./portable_cls_infer \
   --backend ncnn \
-  --model /path/to/best.param \
-  --weights /path/to/best.bin \
+  --model /path/to/model.ncnn.param \
+  --weights /path/to/model.ncnn.bin \
   --labels /path/to/labels.txt \
   --input /path/to/test.jpg \
   --prep crop \
   --threads 4
 ```
 
-### Folder test on exported runtime
+## Dataset evaluation
 
-If your folder structure is:
-
-```text
-dataset_cls/test/
-├─ A_gun/
-├─ B_explosive/
-└─ ...
-```
-
-then you can do a quick runtime-side accuracy check:
+This compares predictions against the parent folder label.
 
 ```bash
 ./portable_cls_infer \
   --backend ncnn \
-  --model /path/to/best.param \
-  --weights /path/to/best.bin \
+  --model /path/to/model.ncnn.param \
+  --weights /path/to/model.ncnn.bin \
   --labels /path/to/labels.txt \
   --input /path/to/dataset_cls/test \
-  --eval-parent-label
+  --prep crop \
+  --threads 4 \
+  --eval-parent-label \
+  --quiet-per-image \
+  --summary-json ./ncnn_test_summary.json \
+  --per-class-csv ./ncnn_test_per_class.csv
 ```
 
-This treats the image parent folder name as the expected class label.
+## Repeated latency test
 
-## Recommended deployment path
+Use this to separate runtime speed from disk/image loading.
 
-### PC smoke test
+```bash
+./portable_cls_infer \
+  --backend ncnn \
+  --model /path/to/model.ncnn.param \
+  --weights /path/to/model.ncnn.bin \
+  --labels /path/to/labels.txt \
+  --input /path/to/test.jpg \
+  --prep crop \
+  --threads 4 \
+  --repeat 200 \
+  --warmup 20 \
+  --quiet-per-image \
+  --summary-json ./ncnn_latency.json
+```
 
-1. Test `best.onnx` with the ONNX backend
-2. Confirm labels and preprocessing match
-3. Compare against your Python/Ultralytics predictions
+## Compare ONNX vs NCNN across splits
 
-### Pi deployment
+```bash
+python3 tools/compare_backends.py \
+  --exe ./build/portable_cls_infer \
+  --onnx-model /home/pi/Desktop/vision_app/models/best.onnx \
+  --ncnn-param /home/pi/Desktop/vision_app/models/model.ncnn.param \
+  --ncnn-bin /home/pi/Desktop/vision_app/models/model.ncnn.bin \
+  --labels /home/pi/Desktop/vision_app/models/labels.txt \
+  --dataset-root /home/pi/Desktop/vision_app/2026_SmartCar_Loongson_Object_Recognition-main/2026_SmartCar_Loongson_Object_Recognition-main/dataset_cls \
+  --output-dir ./bench_out \
+  --split val \
+  --split test \
+  --prep crop \
+  --threads 4 \
+  --latency-image /home/pi/Desktop/vision_app/2026_SmartCar_Loongson_Object_Recognition-main/2026_SmartCar_Loongson_Object_Recognition-main/dataset_cls/test/I_body_armor/I_body_armor_00013.jpg
+```
 
-1. Copy `best.param`, `best.bin`, and `labels.txt` to the Pi
-2. Build NCNN on the Pi
-3. Build this project with `-DENABLE_ONNX_RUNTIME=OFF -DENABLE_NCNN=ON`
-4. Run folder or image tests
-5. Integrate the NCNN header into your camera/homography pipeline
+Outputs:
+- `bench_out/compare_summary.csv`
+- `bench_out/compare_summary.md`
+- per-backend per-split JSON/CSV summaries
 
-## Practical notes
+## Notes
 
-- For Raspberry Pi, start with `--threads 4` on Pi 5 and tune later.
-- Keep Vulkan off first. Get CPU inference stable before exploring GPU/Vulkan.
-- If predictions differ from Python, the first thing to check is preprocessing:
-  - `crop` vs `stretch`
-  - RGB/BGR handling
-  - mean/norm values
-- `labels.txt` must match the class order used during training/export.
-
-## Typical integration plan into your app
-
-Once this CLI works, the next step is usually:
-
-1. load model once at startup
-2. capture frame
-3. rectify / warp top view
-4. classify warped ROI
-5. draw best label + probability on the frame
-
-That means:
-
-- geometry is still handled by your OpenCV / AprilTag / homography code
-- recognition is handled by the exported ONNX or NCNN model
-
-## Notes about this bundle
-
-This project is intentionally small and header-heavy so you can either:
-
-- build it as a standalone test executable, or
-- copy the backend header into your existing app and call it directly
+- If ONNX and NCNN are similar on a single image, that is normal for a small classifier at `224x224` on a Pi 5.
+- Dataset mode includes image loading and preprocessing, so pure runtime differences can look smaller than you expect.
+- The repeated single-image latency mode is a better backend speed comparison.

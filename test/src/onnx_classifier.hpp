@@ -25,29 +25,30 @@
 namespace portable_cls {
 namespace detail {
 
-class ScopedStderrSilencer {
+class ScopedFdSilencer {
 public:
-    explicit ScopedStderrSilencer(bool enabled = true) : enabled_(enabled) {
+    explicit ScopedFdSilencer(int fd, bool enabled = true) : fd_(fd), enabled_(enabled) {
         if (!enabled_) return;
-        std::fflush(stderr);
 #if defined(_WIN32)
-        const int stderr_fd = _fileno(stderr);
-        if (stderr_fd < 0) return;
-        saved_fd_ = _dup(stderr_fd);
+        std::fflush(stdout);
+        std::fflush(stderr);
+        saved_fd_ = _dup(fd_);
         if (saved_fd_ < 0) return;
         null_fd_ = _open("NUL", _O_WRONLY);
         if (null_fd_ < 0) return;
-        if (_dup2(null_fd_, stderr_fd) < 0) {
+        if (_dup2(null_fd_, fd_) < 0) {
             cleanup_no_restore();
             return;
         }
         active_ = true;
 #else
-        saved_fd_ = ::dup(STDERR_FILENO);
+        std::fflush(stdout);
+        std::fflush(stderr);
+        saved_fd_ = ::dup(fd_);
         if (saved_fd_ < 0) return;
         null_fd_ = ::open("/dev/null", O_WRONLY);
         if (null_fd_ < 0) return;
-        if (::dup2(null_fd_, STDERR_FILENO) < 0) {
+        if (::dup2(null_fd_, fd_) < 0) {
             cleanup_no_restore();
             return;
         }
@@ -55,12 +56,10 @@ public:
 #endif
     }
 
-    ~ScopedStderrSilencer() {
-        restore();
-    }
+    ~ScopedFdSilencer() { restore(); }
 
-    ScopedStderrSilencer(const ScopedStderrSilencer&) = delete;
-    ScopedStderrSilencer& operator=(const ScopedStderrSilencer&) = delete;
+    ScopedFdSilencer(const ScopedFdSilencer&) = delete;
+    ScopedFdSilencer& operator=(const ScopedFdSilencer&) = delete;
 
 private:
     void restore() {
@@ -68,18 +67,14 @@ private:
             cleanup_no_restore();
             return;
         }
+        std::fflush(stdout);
         std::fflush(stderr);
 #if defined(_WIN32)
-        const int stderr_fd = _fileno(stderr);
-        if (stderr_fd >= 0 && saved_fd_ >= 0) {
-            _dup2(saved_fd_, stderr_fd);
-        }
+        if (saved_fd_ >= 0) _dup2(saved_fd_, fd_);
         if (saved_fd_ >= 0) _close(saved_fd_);
         if (null_fd_ >= 0) _close(null_fd_);
 #else
-        if (saved_fd_ >= 0) {
-            ::dup2(saved_fd_, STDERR_FILENO);
-        }
+        if (saved_fd_ >= 0) ::dup2(saved_fd_, fd_);
         if (saved_fd_ >= 0) ::close(saved_fd_);
         if (null_fd_ >= 0) ::close(null_fd_);
 #endif
@@ -101,10 +96,25 @@ private:
         active_ = false;
     }
 
+    int fd_ = -1;
     bool enabled_ = true;
     bool active_ = false;
     int saved_fd_ = -1;
     int null_fd_ = -1;
+};
+
+class ScopedStdIoSilencer {
+public:
+    explicit ScopedStdIoSilencer(bool enabled = true)
+#if defined(_WIN32)
+        : out_(_fileno(stdout), enabled), err_(_fileno(stderr), enabled) {}
+#else
+        : out_(STDOUT_FILENO, enabled), err_(STDERR_FILENO, enabled) {}
+#endif
+
+private:
+    ScopedFdSilencer out_;
+    ScopedFdSilencer err_;
 };
 
 }  // namespace detail
@@ -112,8 +122,8 @@ private:
 class OnnxClassifier {
 public:
     struct Config : public CommonConfig {
-        bool enable_cuda = false;              // requires ORT built with CUDA EP
-        bool suppress_stderr_on_load = true;   // hide duplicate-schema spam during ORT init/session load
+        bool enable_cuda = false;            // requires ORT built with CUDA EP
+        bool suppress_stdio_on_load = true;  // hide duplicate-schema spam during ORT init/session load
     };
 
     bool load(const fs::path& model_path,
@@ -133,7 +143,7 @@ public:
         const std::string model_string = model_path.string();
 
         {
-            detail::ScopedStderrSilencer silencer(cfg_.suppress_stderr_on_load);
+            detail::ScopedStdIoSilencer silencer(cfg_.suppress_stdio_on_load);
             env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "portable_cls");
 #if defined(_WIN32)
             const std::wstring model_w = fs::path(model_path).wstring();
@@ -239,42 +249,15 @@ public:
     const std::vector<std::string>& labels() const { return labels_; }
 
 private:
-    static std::vector<float> image_to_nchw(const cv::Mat& prepared_bgr, const CommonConfig& cfg) {
-        cv::Mat rgb;
-        cv::cvtColor(prepared_bgr, rgb, cv::COLOR_BGR2RGB);
-
-        cv::Mat rgb_float;
-        rgb.convertTo(rgb_float, CV_32F);
-
-        const int h = rgb_float.rows;
-        const int w = rgb_float.cols;
-        std::vector<float> chw(static_cast<size_t>(3) * h * w);
-
-        std::vector<cv::Mat> channels;
-        cv::split(rgb_float, channels);
-        for (int c = 0; c < 3; ++c) {
-            const float mean = cfg.mean_vals[c];
-            const float norm = cfg.norm_vals[c];
-            const float* src = channels[c].ptr<float>(0);
-            float* dst = chw.data() + static_cast<size_t>(c) * h * w;
-            const size_t count = static_cast<size_t>(h) * w;
-            for (size_t i = 0; i < count; ++i) {
-                dst[i] = (src[i] - mean) * norm;
-            }
-        }
-        return chw;
-    }
-
+    Config cfg_{};
+    std::vector<std::string> labels_;
     std::unique_ptr<Ort::Env> env_;
-    Ort::SessionOptions session_options_;
+    Ort::SessionOptions session_options_{nullptr};
     std::unique_ptr<Ort::Session> session_;
     std::vector<int64_t> input_shape_;
-    std::vector<std::string> labels_;
-    Config cfg_{};
-
     std::vector<std::string> input_name_storage_;
-    std::vector<std::string> output_name_storage_;
     std::vector<const char*> input_names_;
+    std::vector<std::string> output_name_storage_;
     std::vector<const char*> output_names_;
 };
 
