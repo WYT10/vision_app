@@ -11,7 +11,7 @@ This layout stays limited to these code modules:
 Implemented as:
 
 ```text
-vision_app_min5_v2/
+vision_app_min5_v4_remap/
 ├── CMakeLists.txt
 ├── README.md
 ├── vision_app.conf
@@ -203,3 +203,18 @@ make -j$(nproc)
 The AprilTag path in this package uses **OpenCV ArUco AprilTag dictionaries** when `<opencv2/aruco.hpp>` is available.
 
 If your Pi build does not include OpenCV aruco/contrib, probe and bench still work, but live AprilTag mode will report that AprilTag support is unavailable until you install an AprilTag-capable backend.
+
+
+## Faster warp path
+
+After calibration, the app can precompute a remap cache and save it to `../report/warp_remap.yml.gz`.
+Later deploy runs can load that cache so the per-frame warp uses `cv::remap()` with precomputed maps instead of recomputing geometry each frame.
+
+Useful flags:
+
+```bash
+--use-remap-cache 1
+--fixed-point-remap 1
+--save-remap ../report/warp_remap.yml.gz
+--load-remap ../report/warp_remap.yml.gz
+```

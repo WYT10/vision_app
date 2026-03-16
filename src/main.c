@@ -84,16 +84,22 @@ static bool load_config_file(const std::string& path,
         else if (key == "save_report_md") dep.save_report_md = val;
         else if (key == "save_h_path") dep.save_h_path = val;
         else if (key == "save_rois_path") dep.save_rois_path = val;
+        else if (key == "save_remap_path") dep.save_remap_path = val;
         else if (key == "load_h_path") dep.load_h_path = val;
         else if (key == "load_rois_path") dep.load_rois_path = val;
+        else if (key == "load_remap_path") dep.load_remap_path = val;
         else if (key == "auto_load_h") dep.auto_load_h = parse_bool(val);
         else if (key == "auto_load_rois") dep.auto_load_rois = parse_bool(val);
+        else if (key == "auto_load_remap") dep.auto_load_remap = parse_bool(val);
         else if (key == "auto_save_lock") dep.auto_save_lock = parse_bool(val);
         else if (key == "live_preview_raw") dep.live_preview_raw = parse_bool(val);
         else if (key == "live_preview_warp") dep.live_preview_warp = parse_bool(val);
         else if (key == "show_roi_crops") dep.show_roi_crops = parse_bool(val);
         else if (key == "show_help_overlay") dep.show_help_overlay = parse_bool(val);
         else if (key == "show_status_overlay") dep.show_status_overlay = parse_bool(val);
+        else if (key == "use_remap_cache") dep.use_remap_cache = parse_bool(val);
+        else if (key == "fixed_point_remap") dep.fixed_point_remap = parse_bool(val);
+        else if (key == "save_remap_cache") dep.save_remap_cache = parse_bool(val);
         else if (key == "save_snapshots") dep.save_snapshots = parse_bool(val);
         else if (key == "snapshot_dir") dep.snapshot_dir = val;
         else if (key == "move_step") dep.move_step = std::stod(val);
@@ -161,7 +167,7 @@ static void print_live_help() {
         << "Mode: live\n"
         << "Purpose:\n"
         << "  Search for an AprilTag, show family/id live, lock the tag, compute homography from the\n"
-        << "  tag quadrilateral itself, warp the full frame, and let you edit ratio-based rois.\n\n"
+        << "  tag quadrilateral itself, then warp the full frame. After lock, edit ratio-based rois with keys only.\n\n"
         << "Important camera arguments:\n"
         << "  --device /dev/video0\n"
         << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
@@ -177,12 +183,16 @@ static void print_live_help() {
         << "  --min-quad-area-ratio X     Minimum visible tag area ratio before lock is allowed\n\n"
         << "Warp and ROI arguments:\n"
         << "  --warp-width N --warp-height N\n"
+        << "  --warp-square N             Convenience alias to set both warp width and height to N\n"
         << "  --red-roi x,y,w,h           Ratio roi in warped coordinates\n"
         << "  --image-roi x,y,w,h         Ratio roi in warped coordinates\n"
         << "  --move-step X               Keyboard move step for roi editing\n"
         << "  --size-step X               Keyboard size step for roi editing\n"
         << "  --auto-save-lock 0|1        Save H/rois immediately after locking\n"
-        << "  --save-h PATH --save-rois PATH --save-report-md PATH\n\n"
+        << "  --use-remap-cache 0|1       Precompute remap maps and use cv::remap() for warp\n"
+        << "  --fixed-point-remap 0|1     Store remap maps in compact fixed-point form\n"
+        << "  --save-remap-cache 0|1      Persist remap cache after build/lock\n"
+        << "  --save-h PATH --save-rois PATH --save-remap PATH --save-report-md PATH\n\n"
         << "Preview arguments:\n"
         << "  --live-preview-raw 0|1\n"
         << "  --live-preview-warp 0|1\n"
@@ -190,11 +200,11 @@ static void print_live_help() {
         << "  --show-help-overlay 0|1\n"
         << "  --save-snapshots 0|1 --snapshot-dir PATH\n\n"
         << "Interaction:\n"
-        << "  q/ESC quit | space/enter lock | u unlock | p save all | y save H | o save rois\n"
-        << "  1/2 or TAB select roi | wasd move | ijkl resize | z/x move step | n/m size step\n"
-        << "  h toggle help overlay | t toggle auto-save | r reset rois | c save warped snapshot\n\n"
+        << "  q/ESC quit | space/enter lock | u unlock | p save all | y save H | o save rois | g save remap\n"
+        << "  1/2 or TAB select roi | wasd move | ijkl resize | [ ] move step | , . size step\n"
+        << "  h toggle help overlay | r reset rois | c save warped snapshot\n\n"
         << "Good start:\n"
-        << "  ./vision_app --mode live --tag-family auto --target-id 0 --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
+        << "  ./vision_app --mode live --tag-family auto --target-id 0 --width 1280 --height 720 --fps 30 --fourcc MJPG --warp-square 720\n\n";
 }
 
 static void print_deploy_help() {
@@ -206,13 +216,15 @@ static void print_deploy_help() {
         << "Important arguments:\n"
         << "  --load-h PATH               Saved homography json from live mode\n"
         << "  --load-rois PATH            Saved roi json from live mode\n"
+        << "  --load-remap PATH           Saved remap cache for fast warp startup\n"
         << "  --device /dev/video0\n"
         << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
         << "  --latest-only 0|1 --drain-grabs N\n"
         << "  --live-preview-raw 0|1 --live-preview-warp 0|1\n"
-        << "  --show-roi-crops 0|1\n\n"
+        << "  --show-roi-crops 0|1\n"
+        << "  --use-remap-cache 0|1 --fixed-point-remap 0|1 --load-remap PATH\n\n"
         << "Example:\n"
-        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
+        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json --load-remap ../report/warp_remap.yml.gz --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
 }
 
 static void print_help_mode(const std::string& mode) {
@@ -288,12 +300,15 @@ int main(int argc, char** argv) {
             else if (a == "--refine-edges") tag.refine_edges = parse_bool(need("--refine-edges"));
             else if (a == "--warp-width") dep.warp_width = std::stoi(need("--warp-width"));
             else if (a == "--warp-height") dep.warp_height = std::stoi(need("--warp-height"));
+            else if (a == "--warp-square") { int n = std::stoi(need("--warp-square")); dep.warp_width = n; dep.warp_height = n; }
             else if (a == "--red-roi") { if (!parse_roi_ratio_arg(need("--red-roi"), rois.red_roi)) throw std::runtime_error("bad --red-roi"); }
             else if (a == "--image-roi") { if (!parse_roi_ratio_arg(need("--image-roi"), rois.image_roi)) throw std::runtime_error("bad --image-roi"); }
             else if (a == "--save-h") dep.save_h_path = need("--save-h");
             else if (a == "--load-h") { dep.load_h_path = need("--load-h"); dep.auto_load_h = true; }
             else if (a == "--save-rois") dep.save_rois_path = need("--save-rois");
             else if (a == "--load-rois") { dep.load_rois_path = need("--load-rois"); dep.auto_load_rois = true; }
+            else if (a == "--save-remap") dep.save_remap_path = need("--save-remap");
+            else if (a == "--load-remap") { dep.load_remap_path = need("--load-remap"); dep.auto_load_remap = true; }
             else if (a == "--save-probe-csv") dep.save_probe_csv = need("--save-probe-csv");
             else if (a == "--save-test-csv") dep.save_test_csv = need("--save-test-csv");
             else if (a == "--save-report-md") dep.save_report_md = need("--save-report-md");
@@ -303,6 +318,9 @@ int main(int argc, char** argv) {
             else if (a == "--show-roi-crops") dep.show_roi_crops = parse_bool(need("--show-roi-crops"));
             else if (a == "--show-help-overlay") dep.show_help_overlay = parse_bool(need("--show-help-overlay"));
             else if (a == "--show-status-overlay") dep.show_status_overlay = parse_bool(need("--show-status-overlay"));
+            else if (a == "--use-remap-cache") dep.use_remap_cache = parse_bool(need("--use-remap-cache"));
+            else if (a == "--fixed-point-remap") dep.fixed_point_remap = parse_bool(need("--fixed-point-remap"));
+            else if (a == "--save-remap-cache") dep.save_remap_cache = parse_bool(need("--save-remap-cache"));
             else if (a == "--save-snapshots") dep.save_snapshots = parse_bool(need("--save-snapshots"));
             else if (a == "--snapshot-dir") dep.snapshot_dir = need("--snapshot-dir");
             else if (a == "--move-step") dep.move_step = std::stod(need("--move-step"));

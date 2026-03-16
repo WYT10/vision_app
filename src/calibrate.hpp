@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <opencv2/core.hpp>
+#include <opencv2/core/persistence.hpp>
 #include <opencv2/imgproc.hpp>
 
 #if __has_include(<opencv2/aruco.hpp>)
@@ -59,6 +60,15 @@ struct HomographyLock {
     cv::Mat H;     // src->dst
     cv::Mat Hinv;  // dst->src
     std::array<cv::Point2f, 4> locked_corners{};
+};
+
+struct WarpRemapCache {
+    bool valid = false;
+    bool fixed_point = true;
+    cv::Size source_size{0, 0};
+    cv::Size warp_size{0, 0};
+    cv::Mat map1;
+    cv::Mat map2;
 };
 
 struct RoiRatio {
@@ -300,6 +310,113 @@ static bool warp_full_frame(const cv::Mat& src, cv::Mat& dst, const HomographyLo
     return !dst.empty();
 }
 
+
+static bool build_warp_remap_cache(const HomographyLock& lock,
+                                   const cv::Size& source_size,
+                                   WarpRemapCache& cache,
+                                   bool fixed_point = true) {
+    if (!lock.valid || lock.Hinv.empty()) return false;
+    if (source_size.width <= 0 || source_size.height <= 0) return false;
+    if (lock.warp_size.width <= 0 || lock.warp_size.height <= 0) return false;
+
+    cv::Mat map_x(lock.warp_size, CV_32FC1);
+    cv::Mat map_y(lock.warp_size, CV_32FC1);
+    cv::Matx33d M{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            M(r, c) = lock.Hinv.at<double>(r, c);
+        }
+    }
+
+    for (int y = 0; y < lock.warp_size.height; ++y) {
+        float* mx = map_x.ptr<float>(y);
+        float* my = map_y.ptr<float>(y);
+        for (int x = 0; x < lock.warp_size.width; ++x) {
+            const double xx = M(0,0) * x + M(0,1) * y + M(0,2);
+            const double yy = M(1,0) * x + M(1,1) * y + M(1,2);
+            const double ww = M(2,0) * x + M(2,1) * y + M(2,2);
+            if (std::abs(ww) < 1e-12) {
+                mx[x] = -1.0f;
+                my[x] = -1.0f;
+            } else {
+                mx[x] = static_cast<float>(xx / ww);
+                my[x] = static_cast<float>(yy / ww);
+            }
+        }
+    }
+
+    cache = {};
+    cache.valid = true;
+    cache.fixed_point = fixed_point;
+    cache.source_size = source_size;
+    cache.warp_size = lock.warp_size;
+    if (fixed_point) {
+        cv::convertMaps(map_x, map_y, cache.map1, cache.map2, CV_16SC2);
+    } else {
+        cache.map1 = map_x;
+        cache.map2 = map_y;
+    }
+    return !cache.map1.empty();
+}
+
+static bool remap_cache_matches(const WarpRemapCache& cache,
+                                const cv::Size& source_size,
+                                const cv::Size& warp_size) {
+    return cache.valid && cache.source_size == source_size && cache.warp_size == warp_size && !cache.map1.empty();
+}
+
+static bool warp_full_frame_cached(const cv::Mat& src,
+                                   cv::Mat& dst,
+                                   const WarpRemapCache& cache,
+                                   int interp = cv::INTER_LINEAR) {
+    if (src.empty() || !cache.valid || cache.map1.empty()) return false;
+    if (src.size() != cache.source_size) return false;
+    cv::remap(src, dst, cache.map1, cache.map2, interp, cv::BORDER_CONSTANT);
+    return !dst.empty();
+}
+
+static bool save_warp_remap_cache(const std::string& path, const WarpRemapCache& cache) {
+    if (!cache.valid || cache.map1.empty()) return false;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    cv::FileStorage fs(path, cv::FileStorage::WRITE);
+    if (!fs.isOpened()) return false;
+    fs << "valid" << true;
+    fs << "fixed_point" << cache.fixed_point;
+    fs << "source_width" << cache.source_size.width;
+    fs << "source_height" << cache.source_size.height;
+    fs << "warp_width" << cache.warp_size.width;
+    fs << "warp_height" << cache.warp_size.height;
+    fs << "map1" << cache.map1;
+    fs << "map2" << cache.map2;
+    fs.release();
+    return true;
+}
+
+static bool load_warp_remap_cache(const std::string& path, WarpRemapCache& cache) {
+    cv::FileStorage fs(path, cv::FileStorage::READ);
+    if (!fs.isOpened()) return false;
+    int sw = 0, sh = 0, ww = 0, wh = 0;
+    int fp = 1;
+    cv::Mat map1, map2;
+    fs["source_width"] >> sw;
+    fs["source_height"] >> sh;
+    fs["warp_width"] >> ww;
+    fs["warp_height"] >> wh;
+    fs["fixed_point"] >> fp;
+    fs["map1"] >> map1;
+    fs["map2"] >> map2;
+    fs.release();
+    if (sw <= 0 || sh <= 0 || ww <= 0 || wh <= 0 || map1.empty()) return false;
+    cache = {};
+    cache.valid = true;
+    cache.fixed_point = (fp != 0);
+    cache.source_size = cv::Size(sw, sh);
+    cache.warp_size = cv::Size(ww, wh);
+    cache.map1 = map1;
+    cache.map2 = map2;
+    return true;
+}
+
 static void draw_detection_overlay(cv::Mat& frame, const AprilTagDetection& det, bool locked) {
     if (!det.found) {
         cv::putText(frame, "AprilTag: not found", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0, 0, 255}, 2);
@@ -388,7 +505,7 @@ static bool extract_named_double(const std::string& s, const std::string& sectio
     return extract_double_after(s, k + key.size(), value);
 }
 
-static bool extract_named_int(const std::string& s, const std::string& key, int& value) {
+[[maybe_unused]] static bool extract_named_int(const std::string& s, const std::string& key, int& value) {
     double d = 0.0;
     if (!extract_named_double(s, key, key, d)) {
         size_t pos = s.find(key);
@@ -412,9 +529,18 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
     size_t pi = s.find("\"id\"");
     if (pw == std::string::npos || ph == std::string::npos || pi == std::string::npos) return false;
     double tmp = 0.0;
-    if (!extract_double_after(s, pw, tmp)) return false; w = static_cast<int>(std::lround(tmp));
-    if (!extract_double_after(s, ph, tmp)) return false; h = static_cast<int>(std::lround(tmp));
-    if (!extract_double_after(s, pi, tmp)) return false; id = static_cast<int>(std::lround(tmp));
+    if (!extract_double_after(s, pw, tmp)) {
+        return false;
+    }
+    w = static_cast<int>(std::lround(tmp));
+    if (!extract_double_after(s, ph, tmp)) {
+        return false;
+    }
+    h = static_cast<int>(std::lround(tmp));
+    if (!extract_double_after(s, pi, tmp)) {
+        return false;
+    }
+    id = static_cast<int>(std::lround(tmp));
 
     size_t pf = s.find("\"family\"");
     std::string family;

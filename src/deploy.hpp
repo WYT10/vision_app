@@ -25,29 +25,39 @@ struct DeployConfig {
     std::string save_report_md = "../report/latest_report.md";
     std::string save_h_path = "../report/warp_h.json";
     std::string save_rois_path = "../report/rois.json";
+    std::string save_remap_path = "../report/warp_remap.yml.gz";
     std::string load_h_path = "";
     std::string load_rois_path = "";
+    std::string load_remap_path = "";
 
     bool auto_save_lock = true;
     bool auto_load_h = false;
     bool auto_load_rois = false;
+    bool auto_load_remap = false;
 
     int warp_width = 1280;
     int warp_height = 720;
 
     bool live_preview_raw = true;
     bool live_preview_warp = true;
-    bool show_roi_crops = true;
+    bool show_roi_crops = false;
     bool show_help_overlay = true;
     bool show_status_overlay = true;
     bool save_snapshots = false;
     std::string snapshot_dir = "../report";
 
+    bool use_remap_cache = true;
+    bool fixed_point_remap = true;
+    bool save_remap_cache = true;
+
     double move_step = 0.005;
     double size_step = 0.005;
 };
 
-static void nudge_ratio(RoiRatio& roi, char key, double move_step, double size_step) {
+static RoiRatio default_red_roi() { return RoiRatio{0.05, 0.10, 0.20, 0.20}; }
+static RoiRatio default_image_roi() { return RoiRatio{0.30, 0.10, 0.50, 0.60}; }
+
+static void nudge_ratio(RoiRatio& roi, int key, double move_step, double size_step) {
     if (key == 'a') roi.x -= move_step;
     if (key == 'd') roi.x += move_step;
     if (key == 'w') roi.y -= move_step;
@@ -61,23 +71,22 @@ static void nudge_ratio(RoiRatio& roi, char key, double move_step, double size_s
 
 static void print_live_keys() {
     std::cout
-        << "\nLive mode keys:\n"
+        << "\nLive mode keys (keyboard-only ROI flow):\n"
         << "  q / ESC      quit\n"
         << "  h            toggle help overlay\n"
-        << "  space/enter  force lock current visible tag\n"
+        << "  space/enter  lock current visible tag\n"
         << "  u            unlock and reacquire\n"
         << "  p            save all outputs\n"
         << "  y            save homography only\n"
         << "  o            save rois only\n"
-        << "  t            toggle auto-save on lock\n"
+        << "  g            save remap cache only\n"
         << "  1 / 2        select red_roi / image_roi\n"
         << "  TAB          switch selected roi\n"
-        << "  w a s d      move selected roi\n"
-        << "  i / k        shrink / grow roi height\n"
-        << "  j / l        shrink / grow roi width\n"
-        << "  z / x        decrease / increase move step\n"
-        << "  n / m        decrease / increase size step\n"
-        << "  r            reset rois to defaults\n"
+        << "  wasd         move selected roi\n"
+        << "  ijkl         resize selected roi (height/width)\n"
+        << "  [ / ]        adjust move step\n"
+        << "  , / .        adjust size step\n"
+        << "  r            reset both rois to defaults\n"
         << "  c            save warped snapshot\n"
         << std::endl;
 }
@@ -95,9 +104,11 @@ static void draw_live_hud(cv::Mat& raw_view,
                           const TagLocker& locker,
                           const AprilTagDetection& det,
                           const HomographyLock& lock,
+                          const WarpRemapCache* remap_cache,
                           char selected_roi,
                           bool show_help_overlay,
                           bool auto_save_lock,
+                          bool use_remap_cache,
                           double move_step,
                           double size_step) {
     const std::string phase = live_phase_string(lock.valid, locker, tag_cfg.manual_lock_only);
@@ -121,8 +132,10 @@ static void draw_live_hud(cv::Mat& raw_view,
 
     if (show_help_overlay) {
         const std::vector<std::string> lines = {
-            "space/enter lock  u unlock  p save all  y save H  o save rois",
-            "1/2 or TAB select roi  wasd move  ijkl resize  z/x move step  n/m size step",
+            "space lock  u unlock  p save all  y save H  o save rois  g save remap",
+            "1/2 select roi  wasd move  ijkl resize  [ ] move step  , . size step",
+            std::string("warp=") + (use_remap_cache ? "remap cache" : "warpPerspective") +
+                ((remap_cache && remap_cache->valid) ? " [ready]" : " [not ready]"),
             std::string("family=") + normalize_family_token(tag_cfg.family) + "  options: auto|16|25|36"
         };
         int y = raw_view.rows - 60;
@@ -145,12 +158,43 @@ static bool save_all_outputs(const DeployConfig& dep_cfg,
                              const CaptureStats& capture,
                              const StageStats& stage,
                              const HomographyLock* lock,
-                             const RoiSet& rois) {
+                             const RoiSet& rois,
+                             const WarpRemapCache* remap_cache) {
     bool ok = true;
     if (lock && lock->valid) ok = save_homography_json(dep_cfg.save_h_path, *lock) && ok;
+    if (dep_cfg.save_remap_cache && remap_cache && remap_cache->valid) {
+        ok = save_warp_remap_cache(dep_cfg.save_remap_path, *remap_cache) && ok;
+    }
     ok = save_rois_json(dep_cfg.save_rois_path, rois) && ok;
     ok = write_latest_report_md(dep_cfg.save_report_md, cam_cfg, capture, &stage, (lock && lock->valid) ? lock : nullptr, &rois) && ok;
     return ok;
+}
+
+static bool ensure_remap_cache_ready(const DeployConfig& dep_cfg,
+                                     const cv::Size& source_size,
+                                     const HomographyLock& lock,
+                                     WarpRemapCache& cache,
+                                     std::string& err) {
+    if (!dep_cfg.use_remap_cache || !lock.valid) return true;
+    if (remap_cache_matches(cache, source_size, lock.warp_size)) return true;
+
+    if ((dep_cfg.mode == "deploy" || dep_cfg.auto_load_remap || !dep_cfg.load_remap_path.empty()) && !cache.valid) {
+        const std::string path = dep_cfg.load_remap_path.empty() ? dep_cfg.save_remap_path : dep_cfg.load_remap_path;
+        WarpRemapCache loaded;
+        if (load_warp_remap_cache(path, loaded) && remap_cache_matches(loaded, source_size, lock.warp_size)) {
+            cache = loaded;
+            return true;
+        }
+    }
+
+    if (!build_warp_remap_cache(lock, source_size, cache, dep_cfg.fixed_point_remap)) {
+        err = "failed to build warp remap cache";
+        return false;
+    }
+    if (dep_cfg.save_remap_cache) {
+        save_warp_remap_cache(dep_cfg.save_remap_path, cache);
+    }
+    return true;
 }
 
 static bool run_bench_mode(const CameraConfig& cam_cfg,
@@ -211,13 +255,23 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
 
     TagLocker locker(tag_cfg);
     RollingTimer detect_t, warp_t, total_t;
-    cv::Mat frame, raw_view, warped, red_crop, image_crop;
+    cv::Mat frame, raw_view, warped;
+    WarpRemapCache remap_cache;
     char selected_roi = '1';
     bool show_help_overlay = dep_cfg.show_help_overlay;
     bool auto_save_lock = dep_cfg.auto_save_lock;
     double move_step = dep_cfg.move_step;
     double size_step = dep_cfg.size_step;
     print_live_keys();
+
+    if (!cam_cfg.headless) {
+        if (dep_cfg.live_preview_raw) cv::namedWindow("vision_app_raw", cv::WINDOW_AUTOSIZE);
+        if (dep_cfg.live_preview_warp) cv::namedWindow("vision_app_warp", cv::WINDOW_AUTOSIZE);
+        if (dep_cfg.show_roi_crops) {
+            cv::namedWindow("vision_app_red_roi", cv::WINDOW_AUTOSIZE);
+            cv::namedWindow("vision_app_image_roi", cv::WINDOW_AUTOSIZE);
+        }
+    }
 
     const auto t0 = std::chrono::steady_clock::now();
     while (true) {
@@ -241,9 +295,11 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
                     err = "failed to compute homography after tag lock";
                     return false;
                 }
+                if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
                 if (auto_save_lock) {
                     save_homography_json(dep_cfg.save_h_path, lock);
                     save_rois_json(dep_cfg.save_rois_path, rois);
+                    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
                 }
             }
         } else {
@@ -251,23 +307,27 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
         }
 
         if (lock.valid) {
+            if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
             const auto tw0 = std::chrono::steady_clock::now();
-            if (!warp_full_frame(frame, warped, lock)) {
-                err = "warpPerspective failed";
+            const bool warped_ok = dep_cfg.use_remap_cache
+                ? warp_full_frame_cached(frame, warped, remap_cache)
+                : warp_full_frame(frame, warped, lock);
+            if (!warped_ok) {
+                err = dep_cfg.use_remap_cache ? "remap warp failed" : "warpPerspective failed";
                 return false;
             }
             const double warp_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw0).count();
             warp_t.push(warp_ms);
             draw_roi_overlay(warped, rois, lock, selected_roi);
-            draw_live_hud(raw_view, &warped, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, move_step, size_step);
-            if (dep_cfg.show_roi_crops) {
-                red_crop = crop_roi_clone(warped, rois.red_roi);
-                image_crop = crop_roi_clone(warped, rois.image_roi);
+            draw_live_hud(raw_view, &warped, tag_cfg, locker, det, lock, &remap_cache, selected_roi, show_help_overlay, auto_save_lock, dep_cfg.use_remap_cache, move_step, size_step);
+            if (!cam_cfg.headless && dep_cfg.show_roi_crops) {
+                const cv::Mat red_crop = crop_roi_clone(warped, rois.red_roi);
+                const cv::Mat image_crop = crop_roi_clone(warped, rois.image_roi);
                 if (!red_crop.empty()) cv::imshow("vision_app_red_roi", red_crop);
                 if (!image_crop.empty()) cv::imshow("vision_app_image_roi", image_crop);
             }
         } else {
-            draw_live_hud(raw_view, nullptr, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, move_step, size_step);
+            draw_live_hud(raw_view, nullptr, tag_cfg, locker, det, lock, nullptr, selected_roi, show_help_overlay, auto_save_lock, dep_cfg.use_remap_cache, move_step, size_step);
         }
 
         if (!cam_cfg.headless && dep_cfg.live_preview_raw) cv::imshow("vision_app_raw", raw_view);
@@ -282,9 +342,8 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
         if (key == '2') selected_roi = '2';
         if (key == 9) selected_roi = (selected_roi == '1') ? '2' : '1';
         if (key == 'h') show_help_overlay = !show_help_overlay;
-        if (key == 't') { auto_save_lock = !auto_save_lock; std::cout << "auto_save_lock=" << (auto_save_lock ? "on" : "off") << "\n"; }
-        if (key == 'u') { lock = {}; locker.reset(); warped.release(); }
-        if (key == 'r') { rois = {}; }
+        if (key == 'u') { lock = {}; locker.reset(); warped.release(); remap_cache = {}; }
+        if (key == 'r') { rois.red_roi = default_red_roi(); rois.image_roi = default_image_roi(); }
         if (key == 'p') {
             StageStats stage_preview{};
             stage_preview.frames = cam.stats().frames;
@@ -295,7 +354,7 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
             stage_preview.warp_ms_max = warp_t.max_ms;
             stage_preview.total_ms_max = total_t.max_ms;
             stage_preview.detector_fps_avg = (stage_preview.detect_ms_avg > 0.0) ? (1000.0 / stage_preview.detect_ms_avg) : 0.0;
-            save_all_outputs(dep_cfg, cam_cfg, cam.stats(), stage_preview, lock.valid ? &lock : nullptr, rois);
+            save_all_outputs(dep_cfg, cam_cfg, cam.stats(), stage_preview, lock.valid ? &lock : nullptr, rois, remap_cache.valid ? &remap_cache : nullptr);
             std::cout << "Saved all outputs\n";
         }
         if (key == 'y' && lock.valid) {
@@ -306,6 +365,10 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
             save_rois_json(dep_cfg.save_rois_path, rois);
             std::cout << "Saved rois: " << dep_cfg.save_rois_path << "\n";
         }
+        if (key == 'g' && remap_cache.valid) {
+            save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
+            std::cout << "Saved remap cache: " << dep_cfg.save_remap_path << "\n";
+        }
         if ((key == ' ' || key == 13) && !lock.valid) {
             const AprilTagDetection cand = locker.last_candidate().found ? locker.last_candidate() : det;
             if (locker.force_lock(cand, frame.size())) {
@@ -313,9 +376,11 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
                     err = "failed to compute homography after manual lock";
                     return false;
                 }
+                if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
                 if (auto_save_lock) {
                     save_homography_json(dep_cfg.save_h_path, lock);
                     save_rois_json(dep_cfg.save_rois_path, rois);
+                    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
                 }
             }
         }
@@ -324,13 +389,13 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
             cv::imwrite(path, warped);
             std::cout << "Saved snapshot: " << path << "\n";
         }
-        if (key == 'z') move_step = std::max(0.001, move_step * 0.5);
-        if (key == 'x') move_step = std::min(0.100, move_step * 2.0);
-        if (key == 'n') size_step = std::max(0.001, size_step * 0.5);
-        if (key == 'm') size_step = std::min(0.100, size_step * 2.0);
+        if (key == '[') move_step = std::max(0.001, move_step * 0.5);
+        if (key == ']') move_step = std::min(0.100, move_step * 2.0);
+        if (key == ',') size_step = std::max(0.001, size_step * 0.5);
+        if (key == '.') size_step = std::min(0.100, size_step * 2.0);
 
-        if (selected_roi == '1') nudge_ratio(rois.red_roi, static_cast<char>(key), move_step, size_step);
-        else if (selected_roi == '2') nudge_ratio(rois.image_roi, static_cast<char>(key), move_step, size_step);
+        if (selected_roi == '1') nudge_ratio(rois.red_roi, key, move_step, size_step);
+        else if (selected_roi == '2') nudge_ratio(rois.image_roi, key, move_step, size_step);
 
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (cam_cfg.duration_sec > 0 && elapsed >= cam_cfg.duration_sec && cam_cfg.headless) break;
@@ -354,6 +419,7 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
     append_test_csv(dep_cfg.save_test_csv, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr);
     write_latest_report_md(dep_cfg.save_report_md, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr, &rois);
     if (lock.valid) save_homography_json(dep_cfg.save_h_path, lock);
+    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
     save_rois_json(dep_cfg.save_rois_path, rois);
     return true;
 }
