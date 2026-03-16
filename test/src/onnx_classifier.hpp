@@ -21,9 +21,9 @@ public:
         bool enable_cuda = false;  // requires ORT built with CUDA EP
     };
 
-    bool load(const fs::path& model_path,
-              const fs::path& labels_path,
-              const Config& cfg = Config()) {
+    bool load(const fs::path &model_path,
+              const fs::path &labels_path,
+              const Config &cfg){
         cfg_ = cfg;
         labels_ = read_labels(labels_path);
 
@@ -81,6 +81,12 @@ public:
         if (input_shape_[3] < 1) input_shape_[3] = cfg_.input_width;
 
         return true;
+    }
+
+    bool load(const fs::path &model_path,
+              const fs::path &labels_path)
+    {
+        return load(model_path, labels_path, Config{});
     }
 
     Result classify(const cv::Mat& image_bgr, int topk_override = -1) const {
