@@ -1,6 +1,0 @@
-#pragma once
-#include "vision_app.hpp"
-
-namespace vision_app {
-void print_runtime_stats(const AppOptions& opt, const RuntimeStats& stats);
-} // namespace vision_app
