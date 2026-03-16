@@ -104,10 +104,6 @@ struct AppOptions {
 inline void print_live_controls() {
     std::cout << R"TXT(
 === vision_app live controls ===
-Windows
-  vision_app_camera : raw feed + tag overlay
-  vision_app_warp   : warp preview + ROIs + white invalid area
-
 Keys
   SPACE / ENTER : lock current tag
   u             : unlock / reacquire
@@ -124,9 +120,12 @@ Keys
   h             : show this help again
   q / ESC       : quit
 
-Notes
-  - terminal output is event-only; no per-frame status spam
-  - use 640x480 for a meaningful warp preview
+Windows
+  vision_app_camera : raw feed + tag overlay
+  vision_app_warp   : warp preview + ROIs + white invalid area
+
+Note
+  - terminal prints only on lock / unlock / roi / step / save / help
 )TXT" << std::flush;
 }
 
