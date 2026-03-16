@@ -1,105 +1,114 @@
-# vision_app stable v5
+# vision_app live-safe v6
 
-Five code modules only:
+This version keeps the project to 5 code modules:
+
 - `camera.hpp`
 - `calibrate.hpp`
 - `stats.hpp`
 - `deploy.hpp`
 - `main.c`
 
-## Purpose
-- probe USB camera modes
-- benchmark one camera mode
-- live AprilTag calibration
-- build a stable full-image auto-fit warp
-- soft-limit the warp canvas so Pi does not crash on large previews
-- save precomputed remap maps + valid mask + ROI config
-- deploy later using the saved precomputation
+## What changed in this version
 
-## Key stabilization changes
-- **single preview window** in live/deploy
-- **keyboard-only ROI editing**
-- **auto-fit full transformed source image** into the warp canvas
-- **soft max on warp size**; large auto-fit canvases are scaled down
-- **preview downscale** independent from processing warp size
-- **valid mask** stored and displayed; empty/invalid regions remain visible but are ignored by later processing
-- **remap cache** saved for fast later feeds
+The live preview path is made safer for Raspberry Pi:
 
-## Modes
+- one main window only
+- **searching mode** shows raw frame with tag overlay + a **small inset live warp preview**
+- the inset preview is rebuilt only every `temp_preview_stride` frames
+- the inset preview uses a small capped square (`temp_preview_square`)
+- after lock, the app shows the **locked warped preview** in the same main window
+- keyboard-only ROI editing
+- auto-fit warp of the transformed full image
+- soft limits clamp camera size, warp size, and preview size
+- invalid warped pixels are tracked by a mask and shown on a white canvas
+
+## Main functions now
+
 ### probe
-List camera formats/resolutions/FPS from `v4l2-ctl`.
+List camera formats, resolutions, and advertised FPS.
 
 ```bash
 ./vision_app --mode probe
 ```
 
 ### bench
-Open one camera config and measure actual FPS.
+Measure real runtime FPS for one camera configuration.
+
+Good starting command:
 
 ```bash
-./vision_app --mode bench --device /dev/video0 --width 1280 --height 720 --fps 30 --fourcc MJPG --duration 10
+./vision_app --mode bench \
+  --device /dev/video0 \
+  --width 640 --height 480 \
+  --fourcc MJPG \
+  --fps 180 \
+  --buffer-size 1 \
+  --latest-only 1 \
+  --drain-grabs 1 \
+  --headless 1 \
+  --duration 10
 ```
 
 ### live
-Calibration flow:
-1. open camera with your chosen config
-2. detect AprilTag family `auto|16|25|36`
-3. while unlocked, if a candidate exists, show temporary full-image auto-fit warp preview
-4. press `space` to lock or allow auto-lock if enabled
-5. edit `red_roi` and `image_roi` with keyboard
-6. save homography/remap/mask/rois
+Live calibration with safer warp preview.
 
-Recommended start:
+Good starting command:
 
 ```bash
 ./vision_app --mode live \
   --device /dev/video0 \
-  --width 1280 --height 720 --fps 30 \
+  --width 640 --height 480 \
   --fourcc MJPG \
+  --fps 180 \
+  --buffer-size 1 \
+  --latest-only 1 \
+  --drain-grabs 1 \
   --tag-family auto \
   --target-id 0 \
   --require-target-id 1 \
   --manual-lock-only 1 \
-  --warp-soft-max 900 \
-  --preview-soft-max 600
+  --warp-soft-max 700 \
+  --preview-soft-max 500
 ```
 
 ### deploy
-Load saved remap + ROI config and run directly.
+Load saved warp + ROIs and run directly.
 
 ```bash
 ./vision_app --mode deploy \
   --device /dev/video0 \
-  --width 1280 --height 720 --fps 30 \
+  --width 640 --height 480 \
   --fourcc MJPG \
+  --fps 180 \
   --load-warp ../report/warp_package.yml.gz \
   --load-rois ../report/rois.yml
 ```
 
 ## Live controls
-- `space` / `enter`: lock current candidate
-- `u`: unlock and reacquire
+
+### Searching / live preview
+- `space` or `enter`: lock current visible tag
+- `u`: unlock and go back to searching
+- `h`: toggle help overlay
+- `q` or `ESC`: quit
+
+### ROI editing after lock
 - `1`: select `red_roi`
 - `2`: select `image_roi`
 - `w a s d`: move selected ROI
-- `j l`: shrink/grow width
-- `i k`: shrink/grow height
-- `[` `]`: move step down/up
-- `,` `.`: size step down/up
-- `r`: reset selected ROI
-- `p`: save all
-- `o`: save ROIs only
-- `y`: save warp package only
-- `h`: toggle help overlay
-- `q` / `ESC`: quit
-
-## Saved files
-Default under `../report/` when run from `build/`:
-- `warp_package.yml.gz` : homography + remap maps + valid mask + sizes
-- `rois.yml` : ratio ROIs
-- `test_results.csv`
-- `latest_report.md`
+- `i k`: change ROI height
+- `j l`: change ROI width
+- `[` `]`: smaller / larger move step
+- `,` `.`: smaller / larger size step
+- `r`: reset ROIs to defaults
+- `p`: save warp + rois + report
+- `o`: save rois only
+- `y`: save warp only
 
 ## Notes
-- AprilTag detection uses OpenCV ArUco AprilTag dictionaries if available.
-- If your OpenCV build does not include `aruco`, probe/bench still work, but live calibration and deploy warp loading from tag detection will be unavailable.
+
+- Missing ROI file on startup is treated as normal and defaults are used.
+- If requested camera size exceeds `camera_soft_max`, the code clamps it down automatically.
+- If fitted warp size exceeds `warp_soft_max`, the code scales it down automatically.
+- Preview is independently downscaled to `preview_soft_max`.
+- Invalid warped regions are shown in white and saved in the mask inside the warp package.
