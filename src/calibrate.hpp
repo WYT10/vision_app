@@ -106,10 +106,22 @@ static std::array<cv::Point2f, 4> make_warp_quad(const cv::Size& size) {
     };
 }
 
+// Normalize user-supplied family name.
+// Accepts short forms ("16", "25", "36") and full names ("tag16h5", …).
+// The special value "auto" tries all families and picks the largest detected tag.
+static std::string normalize_tag_family(const std::string& s) {
+    if (s == "auto")                                   return "auto";
+    if (s == "16" || s == "16h5"  || s == "tag16h5")  return "tag16h5";
+    if (s == "25" || s == "25h9"  || s == "tag25h9")  return "tag25h9";
+    if (s == "36h10"              || s == "tag36h10") return "tag36h10";
+    if (s == "36" || s == "36h11" || s == "tag36h11") return "tag36h11";
+    return s; // pass through unknown values as-is
+}
+
 #if VISION_APP_HAS_ARUCO
 static int april_family_to_dict(const std::string& family) {
-    if (family == "tag16h5") return cv::aruco::DICT_APRILTAG_16h5;
-    if (family == "tag25h9") return cv::aruco::DICT_APRILTAG_25h9;
+    if (family == "tag16h5")  return cv::aruco::DICT_APRILTAG_16h5;
+    if (family == "tag25h9")  return cv::aruco::DICT_APRILTAG_25h9;
     if (family == "tag36h10") return cv::aruco::DICT_APRILTAG_36h10;
     return cv::aruco::DICT_APRILTAG_36h11;
 }
@@ -125,43 +137,61 @@ static bool detect_apriltag_best(const cv::Mat& bgr_or_gray,
     if (bgr_or_gray.channels() == 1) gray = bgr_or_gray;
     else cv::cvtColor(bgr_or_gray, gray, cv::COLOR_BGR2GRAY);
 
-    auto dict = cv::aruco::getPredefinedDictionary(april_family_to_dict(cfg.family));
-    auto params = cv::aruco::DetectorParameters();
+    // Helper lambda: detect with one specific dictionary and return the best hit.
+    auto detect_with_dict = [&](int dict_id, const std::string& fname) -> AprilTagDetection {
+        AprilTagDetection d;
+        auto dict   = cv::aruco::getPredefinedDictionary(dict_id);
+        auto params = cv::aruco::DetectorParameters();
 #if CV_VERSION_MAJOR >= 4
-    params.cornerRefinementMethod = cfg.refine_edges ? cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
+        params.cornerRefinementMethod = cfg.refine_edges
+            ? cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
 #endif
-    params.aprilTagQuadDecimate = cfg.decimate;
-    params.aprilTagQuadSigma = cfg.blur_sigma;
-    params.useAruco3Detection = false;
+        params.aprilTagQuadDecimate = cfg.decimate;
+        params.aprilTagQuadSigma    = cfg.blur_sigma;
+        params.useAruco3Detection   = false;
 
-    cv::aruco::ArucoDetector detector(dict, params);
-    std::vector<int> ids;
-    std::vector<std::vector<cv::Point2f>> corners;
-    detector.detectMarkers(gray, corners, ids);
+        cv::aruco::ArucoDetector detector(dict, params);
+        std::vector<int> ids;
+        std::vector<std::vector<cv::Point2f>> corners;
+        detector.detectMarkers(gray, corners, ids);
+        if (ids.empty()) return d;
 
-    if (ids.empty()) return true;
-
-    int best_i = -1;
-    double best_area = -1.0;
-    for (size_t i = 0; i < ids.size(); ++i) {
-        if (cfg.require_target_id && ids[i] != cfg.target_id) continue;
-        if (corners[i].size() != 4) continue;
-        const double area = std::abs(cv::contourArea(corners[i]));
-        if (area > best_area) {
-            best_area = area;
-            best_i = static_cast<int>(i);
+        int best_i = -1;
+        double best_area = -1.0;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (cfg.require_target_id && ids[i] != cfg.target_id) continue;
+            if (corners[i].size() != 4) continue;
+            const double area = std::abs(cv::contourArea(corners[i]));
+            if (area > best_area) { best_area = area; best_i = static_cast<int>(i); }
         }
+        if (best_i < 0) return d;
+
+        const auto& c = corners[best_i];
+        d.found   = true;
+        d.family  = fname;
+        d.id      = ids[best_i];
+        d.area    = std::abs(cv::contourArea(c));
+        d.corners = {c[0], c[1], c[2], c[3]};
+        d.center  = 0.25f * (c[0] + c[1] + c[2] + c[3]);
+        return d;
+    };
+
+    // "auto": scan all four families; keep the largest-area tag found.
+    if (cfg.family == "auto") {
+        const std::pair<int, const char*> kFamilies[] = {
+            {cv::aruco::DICT_APRILTAG_36h11, "tag36h11"},
+            {cv::aruco::DICT_APRILTAG_25h9,  "tag25h9"},
+            {cv::aruco::DICT_APRILTAG_16h5,  "tag16h5"},
+            {cv::aruco::DICT_APRILTAG_36h10, "tag36h10"},
+        };
+        for (const auto& kv : kFamilies) {
+            AprilTagDetection d = detect_with_dict(kv.first, kv.second);
+            if (d.found && (!out.found || d.area > out.area)) out = d;
+        }
+        return true;
     }
 
-    if (best_i < 0) return true;
-
-    const auto& c = corners[best_i];
-    out.found = true;
-    out.family = cfg.family;
-    out.id = ids[best_i];
-    out.area = std::abs(cv::contourArea(c));
-    out.corners = {c[0], c[1], c[2], c[3]};
-    out.center = 0.25f * (c[0] + c[1] + c[2] + c[3]);
+    out = detect_with_dict(april_family_to_dict(cfg.family), cfg.family);
     return true;
 #else
     (void)bgr_or_gray; (void)cfg;
@@ -425,6 +455,90 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
 static cv::Mat crop_roi_clone(const cv::Mat& warped, const RoiRatio& roi) {
     if (warped.empty()) return {};
     return warped(ratio_to_rect(roi, warped.size())).clone();
+}
+
+// ---------------------------------------------------------------------------
+// Mouse-drag support for the warp-preview window.
+// Register once with cv::setMouseCallback("vision_app_warp", on_warp_mouse, &data).
+// Left-button drag  : moves the selected ROI.
+// Right-button drag : resizes the selected ROI by dragging its bottom-right corner.
+// ---------------------------------------------------------------------------
+struct WarpMouseCbData {
+    RoiSet*  rois         = nullptr;
+    cv::Size warp_size    {};
+    bool     lock_valid   = false;   // set to true once the homography is locked
+    char*    selected_roi = nullptr; // pointer to the caller's '1'/'2' selector
+
+    // internal drag state
+    bool     is_dragging  = false;
+    bool     is_resizing  = false;
+    int      drag_roi     = 0;       // 1 = red_roi, 2 = image_roi
+    cv::Point drag_start  {};
+    RoiRatio roi_at_drag_start {};
+};
+
+static void on_warp_mouse(int event, int x, int y, int /*flags*/, void* userdata) {
+    auto* d = static_cast<WarpMouseCbData*>(userdata);
+    if (!d || !d->rois || !d->lock_valid || d->warp_size.area() == 0) return;
+
+    const cv::Point pt(x, y);
+
+    auto pick_roi = [&]() -> int {
+        const cv::Rect rr = ratio_to_rect(d->rois->red_roi,   d->warp_size);
+        const cv::Rect ir = ratio_to_rect(d->rois->image_roi, d->warp_size);
+        if (rr.contains(pt)) return 1;
+        if (ir.contains(pt)) return 2;
+        return 0;
+    };
+
+    auto current_roi = [&]() -> RoiRatio& {
+        return (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
+    };
+
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        d->drag_roi = pick_roi();
+        if (d->drag_roi) {
+            d->is_dragging        = true;
+            d->drag_start         = pt;
+            d->roi_at_drag_start  = (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
+            if (d->selected_roi) *d->selected_roi = static_cast<char>('0' + d->drag_roi);
+        }
+    } else if (event == cv::EVENT_RBUTTONDOWN) {
+        d->drag_roi = pick_roi();
+        if (d->drag_roi) {
+            d->is_resizing        = true;
+            d->drag_start         = pt;
+            d->roi_at_drag_start  = (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
+            if (d->selected_roi) *d->selected_roi = static_cast<char>('0' + d->drag_roi);
+        }
+    } else if (event == cv::EVENT_MOUSEMOVE) {
+        if (d->is_dragging && d->drag_roi) {
+            const double dx = static_cast<double>(x - d->drag_start.x) / d->warp_size.width;
+            const double dy = static_cast<double>(y - d->drag_start.y) / d->warp_size.height;
+            RoiRatio& roi  = current_roi();
+            roi.x = d->roi_at_drag_start.x + dx;
+            roi.y = d->roi_at_drag_start.y + dy;
+            roi.w = d->roi_at_drag_start.w;
+            roi.h = d->roi_at_drag_start.h;
+            clamp_and_validate_roi(roi);
+        } else if (d->is_resizing && d->drag_roi) {
+            // Right-drag moves the bottom-right corner, changing w and h.
+            const double dx = static_cast<double>(x - d->drag_start.x) / d->warp_size.width;
+            const double dy = static_cast<double>(y - d->drag_start.y) / d->warp_size.height;
+            RoiRatio& roi  = current_roi();
+            roi.x = d->roi_at_drag_start.x;
+            roi.y = d->roi_at_drag_start.y;
+            roi.w = d->roi_at_drag_start.w + dx;
+            roi.h = d->roi_at_drag_start.h + dy;
+            clamp_and_validate_roi(roi);
+        }
+    } else if (event == cv::EVENT_LBUTTONUP) {
+        d->is_dragging = false;
+        d->drag_roi    = 0;
+    } else if (event == cv::EVENT_RBUTTONUP) {
+        d->is_resizing = false;
+        d->drag_roi    = 0;
+    }
 }
 
 } // namespace vision_app
