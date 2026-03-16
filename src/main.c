@@ -58,6 +58,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "warp_preview_max") o.warp_preview_max = std::stoi(v);
         else if (k == "temp_preview_square") o.temp_preview_square = std::stoi(v);
         else if (k == "temp_preview_stride") o.temp_preview_stride = std::stoi(v);
+        else if (k == "tag_fill_ratio") o.tag_fill_ratio = std::stod(v);
         else if (k == "tag_family") o.tag_family = v;
         else if (k == "target_id") o.target_id = std::stoi(v);
         else if (k == "require_target_id") o.require_target_id = parse_bool(v);
@@ -108,10 +109,11 @@ static void print_help() {
         << "  --warp-soft-max 700\n"
         << "  --camera-preview-max 640\n"
         << "  --warp-preview-max 640\n"
-        << "  --temp-preview-square 220\n"
+        << "  --temp-preview-square 260\n"
         << "  --temp-preview-stride 3\n\n"
         << "Tag args\n"
         << "  --tag-family auto|16|25|36\n"
+        << "  --tag-fill-ratio 0.70\n"
         << "  --target-id 0\n"
         << "  --require-target-id 1\n"
         << "  --manual-lock-only 1\n"
@@ -137,7 +139,7 @@ static void print_help() {
         << "Examples\n"
         << "  ./vision_app --mode probe\n"
         << "  ./vision_app --mode bench --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --headless 1 --duration 10\n"
-        << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1 --camera-preview-max 700 --warp-preview-max 700\n"
+        << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1 --tag-fill-ratio 0.70 --camera-preview-max 700 --warp-preview-max 700\n"
         << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend onnx --model-path ../models/model.onnx\n";
 }
 
@@ -170,6 +172,7 @@ int main(int argc, char** argv) {
         else if (a == "--warp-preview-max") opt.warp_preview_max = std::stoi(need("--warp-preview-max"));
         else if (a == "--temp-preview-square") opt.temp_preview_square = std::stoi(need("--temp-preview-square"));
         else if (a == "--temp-preview-stride") opt.temp_preview_stride = std::stoi(need("--temp-preview-stride"));
+        else if (a == "--tag-fill-ratio") opt.tag_fill_ratio = std::stod(need("--tag-fill-ratio"));
         else if (a == "--tag-family") opt.tag_family = need("--tag-family");
         else if (a == "--target-id") opt.target_id = std::stoi(need("--target-id"));
         else if (a == "--require-target-id") opt.require_target_id = parse_bool(need("--require-target-id"));

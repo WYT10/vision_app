@@ -44,6 +44,7 @@ struct WarpPackage {
     cv::Size warp_size;
     std::string family;
     int id = -1;
+    double tag_fill_ratio = 0.70;
 };
 
 inline bool finite_pt(const cv::Point2f& p) {
@@ -100,7 +101,9 @@ inline bool detect_apriltag_best(const cv::Mat& frame,
         int best = 0;
         if (cfg.require_target_id) {
             best = -1;
-            for (int i = 0; i < static_cast<int>(ids.size()); ++i) if (ids[i] == cfg.target_id) { best = i; break; }
+            for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
+                if (ids[i] == cfg.target_id) { best = i; break; }
+            }
             if (best < 0) continue;
         }
         det.found = true;
@@ -108,6 +111,7 @@ inline bool detect_apriltag_best(const cv::Mat& frame,
         det.id = ids[best];
         for (int k = 0; k < 4; ++k) det.corners[k] = corners[best][k];
         det.center = 0.25f * (det.corners[0] + det.corners[1] + det.corners[2] + det.corners[3]);
+        err.clear();
         return true;
     }
     err.clear();
@@ -170,93 +174,106 @@ inline bool load_rois_yaml(const std::string& path, RoiConfig& rois) {
     return true;
 }
 
+inline bool build_centered_warp_package_from_detection(const AprilTagDetection& det,
+                                                       const cv::Size& src_size,
+                                                       int canvas_side,
+                                                       double tag_fill_ratio,
+                                                       WarpPackage& pack,
+                                                       std::string& err) {
+    pack = {};
+    if (!det.found) { err = "tag not found"; return false; }
+    for (const auto& p : det.corners) {
+        if (!finite_pt(p)) { err = "non-finite tag corner"; return false; }
+    }
+    if (quad_area4(det.corners) < 64.0) { err = "tag quadrilateral too small"; return false; }
+
+    int side = std::max(160, canvas_side);
+    side = std::min(side, 1024);
+    const double fill = std::clamp(tag_fill_ratio, 0.25, 0.90);
+    const double inner = static_cast<double>(side) * fill;
+    const double margin = 0.5 * (static_cast<double>(side) - inner);
+
+    std::vector<cv::Point2f> src_quad(4), dst_quad(4);
+    for (int i = 0; i < 4; ++i) src_quad[i] = det.corners[i];
+    dst_quad[0] = cv::Point2f(static_cast<float>(margin), static_cast<float>(margin));
+    dst_quad[1] = cv::Point2f(static_cast<float>(margin + inner), static_cast<float>(margin));
+    dst_quad[2] = cv::Point2f(static_cast<float>(margin + inner), static_cast<float>(margin + inner));
+    dst_quad[3] = cv::Point2f(static_cast<float>(margin), static_cast<float>(margin + inner));
+
+    cv::Mat H = cv::getPerspectiveTransform(src_quad, dst_quad);
+    if (H.empty()) { err = "failed to compute homography"; return false; }
+    cv::Mat Hinv = H.inv();
+    if (Hinv.empty()) { err = "homography inversion failed"; return false; }
+
+    cv::Mat mapx(side, side, CV_32FC1, cv::Scalar(-1.0f));
+    cv::Mat mapy(side, side, CV_32FC1, cv::Scalar(-1.0f));
+    cv::Mat valid(side, side, CV_8UC1, cv::Scalar(0));
+
+    const cv::Matx33d Hinvx(
+        Hinv.at<double>(0,0), Hinv.at<double>(0,1), Hinv.at<double>(0,2),
+        Hinv.at<double>(1,0), Hinv.at<double>(1,1), Hinv.at<double>(1,2),
+        Hinv.at<double>(2,0), Hinv.at<double>(2,1), Hinv.at<double>(2,2));
+
+    for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+            const cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
+            const cv::Vec3d p = Hinvx * v;
+            const double w = p[2];
+            if (!std::isfinite(w) || std::abs(w) < 1e-12) continue;
+            const double sx = p[0] / w;
+            const double sy = p[1] / w;
+            if (std::isfinite(sx) && std::isfinite(sy) &&
+                sx >= 0.0 && sy >= 0.0 &&
+                sx < static_cast<double>(src_size.width) &&
+                sy < static_cast<double>(src_size.height)) {
+                mapx.at<float>(y,x) = static_cast<float>(sx);
+                mapy.at<float>(y,x) = static_cast<float>(sy);
+                valid.at<unsigned char>(y,x) = 255;
+            }
+        }
+    }
+
+    cv::Mat map1, map2;
+    cv::convertMaps(mapx, mapy, map1, map2, CV_16SC2);
+
+    pack.valid = true;
+    pack.H = H;
+    pack.Hinv = Hinv;
+    pack.map1 = map1;
+    pack.map2 = map2;
+    pack.valid_mask = valid;
+    pack.src_size = src_size;
+    pack.warp_size = {side, side};
+    pack.family = det.family;
+    pack.id = det.id;
+    pack.tag_fill_ratio = fill;
+    err.clear();
+    return true;
+}
+
 inline bool build_warp_package_from_detection(const AprilTagDetection& det,
                                               const cv::Size& src_size,
                                               int warp_soft_max,
                                               WarpPackage& pack,
                                               std::string& err) {
-    pack = {};
-    if (!det.found) { err = "tag not found"; return false; }
-    for (const auto& p : det.corners) if (!finite_pt(p)) { err = "non-finite tag corner"; return false; }
-    if (quad_area4(det.corners) < 100.0) { err = "tag quadrilateral too small"; return false; }
+    return build_centered_warp_package_from_detection(det, src_size, warp_soft_max, 0.70, pack, err);
+}
 
-    std::vector<cv::Point2f> src_quad(4), dst_quad(4);
-    for (int i=0;i<4;++i) src_quad[i] = det.corners[i];
-    dst_quad[0] = {0.0f, 0.0f};
-    dst_quad[1] = {1.0f, 0.0f};
-    dst_quad[2] = {1.0f, 1.0f};
-    dst_quad[3] = {0.0f, 1.0f};
-    cv::Mat H0 = cv::getPerspectiveTransform(src_quad, dst_quad);
-    if (H0.empty()) { err = "failed to compute homography"; return false; }
-
-    std::vector<cv::Point2f> img_corners = {
-        {0.0f,0.0f},
-        {static_cast<float>(src_size.width-1),0.0f},
-        {static_cast<float>(src_size.width-1),static_cast<float>(src_size.height-1)},
-        {0.0f,static_cast<float>(src_size.height-1)}
-    };
-    std::vector<cv::Point2f> transformed;
-    cv::perspectiveTransform(img_corners, transformed, H0);
-    for (const auto& p : transformed) if (!finite_pt(p)) { err = "transformed corners non-finite"; return false; }
-    float minx=transformed[0].x, miny=transformed[0].y, maxx=transformed[0].x, maxy=transformed[0].y;
-    for (const auto& p : transformed) { minx = std::min(minx,p.x); miny = std::min(miny,p.y); maxx = std::max(maxx,p.x); maxy = std::max(maxy,p.y); }
-    double bbox_w = static_cast<double>(maxx - minx);
-    double bbox_h = static_cast<double>(maxy - miny);
-    if (!(bbox_w > 1.0 && bbox_h > 1.0)) { err = "invalid transformed bounds"; return false; }
-
-    double scale = 1.0;
-    const double m = std::max(bbox_w, bbox_h);
-    if (warp_soft_max > 0 && m > static_cast<double>(warp_soft_max)) scale = static_cast<double>(warp_soft_max) / m;
-    const int out_w = std::max(32, static_cast<int>(std::ceil(bbox_w * scale)));
-    const int out_h = std::max(32, static_cast<int>(std::ceil(bbox_h * scale)));
-
-    cv::Mat T = (cv::Mat_<double>(3,3) << scale, 0.0, -minx*scale,
-                                          0.0, scale, -miny*scale,
-                                          0.0, 0.0, 1.0);
-    cv::Mat H = T * H0;
-    cv::Mat Hinv = H.inv();
-    if (Hinv.empty()) { err = "homography inversion failed"; return false; }
-
-    cv::Mat mapx(out_h, out_w, CV_32FC1), mapy(out_h, out_w, CV_32FC1), valid(out_h, out_w, CV_8UC1, cv::Scalar(0));
-    const cv::Matx33d Hinvx(
-        Hinv.at<double>(0,0), Hinv.at<double>(0,1), Hinv.at<double>(0,2),
-        Hinv.at<double>(1,0), Hinv.at<double>(1,1), Hinv.at<double>(1,2),
-        Hinv.at<double>(2,0), Hinv.at<double>(2,1), Hinv.at<double>(2,2));
-    for (int y = 0; y < out_h; ++y) {
-        for (int x = 0; x < out_w; ++x) {
-            const cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
-            const cv::Vec3d p = Hinvx * v;
-            const double w = p[2];
-            if (!std::isfinite(w) || std::abs(w) < 1e-12) {
-                mapx.at<float>(y,x) = -1.0f; mapy.at<float>(y,x) = -1.0f; continue;
-            }
-            const double sx = p[0] / w, sy = p[1] / w;
-            mapx.at<float>(y,x) = static_cast<float>(sx);
-            mapy.at<float>(y,x) = static_cast<float>(sy);
-            if (std::isfinite(sx) && std::isfinite(sy) && sx >= 0.0 && sy >= 0.0 && sx < src_size.width && sy < src_size.height) valid.at<unsigned char>(y,x) = 255;
-        }
-    }
-    cv::Mat map1, map2;
-    cv::convertMaps(mapx, mapy, map1, map2, CV_16SC2);
-
-    pack.valid = true;
-    pack.H = H.clone();
-    pack.Hinv = Hinv.clone();
-    pack.map1 = map1;
-    pack.map2 = map2;
-    pack.valid_mask = valid.clone();
-    pack.src_size = src_size;
-    pack.warp_size = cv::Size(out_w, out_h);
-    pack.family = det.family;
-    pack.id = det.id;
-    return true;
+inline bool build_warp_package_from_detection(const AprilTagDetection& det,
+                                              const cv::Size& src_size,
+                                              int warp_soft_max,
+                                              double tag_fill_ratio,
+                                              WarpPackage& pack,
+                                              std::string& err) {
+    return build_centered_warp_package_from_detection(det, src_size, warp_soft_max, tag_fill_ratio, pack, err);
 }
 
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {
     if (!pack.valid || src.empty()) return false;
     cv::remap(src, dst, pack.map1, pack.map2, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255,255,255));
+    if (dst.empty()) return false;
     if (out_valid) *out_valid = pack.valid_mask;
-    return !dst.empty();
+    return true;
 }
 
 inline bool save_warp_package(const std::string& path, const WarpPackage& pack) {
@@ -268,6 +285,7 @@ inline bool save_warp_package(const std::string& path, const WarpPackage& pack) 
     fs << "id" << pack.id;
     fs << "src_w" << pack.src_size.width << "src_h" << pack.src_size.height;
     fs << "warp_w" << pack.warp_size.width << "warp_h" << pack.warp_size.height;
+    fs << "tag_fill_ratio" << pack.tag_fill_ratio;
     fs << "H" << pack.H;
     fs << "Hinv" << pack.Hinv;
     fs << "map1" << pack.map1;
@@ -286,6 +304,7 @@ inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
     fs["id"] >> pack.id;
     fs["src_w"] >> sw; fs["src_h"] >> sh;
     fs["warp_w"] >> ww; fs["warp_h"] >> wh;
+    if (!fs["tag_fill_ratio"].empty()) fs["tag_fill_ratio"] >> pack.tag_fill_ratio;
     fs["H"] >> pack.H;
     fs["Hinv"] >> pack.Hinv;
     fs["map1"] >> pack.map1;
