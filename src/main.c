@@ -53,7 +53,9 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "duration") o.duration = std::stoi(v);
         else if (k == "camera_soft_max") o.camera_soft_max = std::stoi(v);
         else if (k == "warp_soft_max") o.warp_soft_max = std::stoi(v);
-        else if (k == "preview_soft_max") o.preview_soft_max = std::stoi(v);
+        else if (k == "preview_soft_max") { o.preview_soft_max = std::stoi(v); o.camera_preview_max = o.preview_soft_max; o.warp_preview_max = o.preview_soft_max; }
+        else if (k == "camera_preview_max") o.camera_preview_max = std::stoi(v);
+        else if (k == "warp_preview_max") o.warp_preview_max = std::stoi(v);
         else if (k == "temp_preview_square") o.temp_preview_square = std::stoi(v);
         else if (k == "temp_preview_stride") o.temp_preview_stride = std::stoi(v);
         else if (k == "tag_family") o.tag_family = v;
@@ -68,44 +70,75 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "save_report") o.save_report = v;
         else if (k == "red_roi") parse_roi_csv(v, o.default_rois.red_roi);
         else if (k == "image_roi") parse_roi_csv(v, o.default_rois.image_roi);
+        else if (k == "red_h1_low") o.red_cfg.h1_low = std::stoi(v);
+        else if (k == "red_h1_high") o.red_cfg.h1_high = std::stoi(v);
+        else if (k == "red_h2_low") o.red_cfg.h2_low = std::stoi(v);
+        else if (k == "red_h2_high") o.red_cfg.h2_high = std::stoi(v);
+        else if (k == "red_s_min") o.red_cfg.s_min = std::stoi(v);
+        else if (k == "red_v_min") o.red_cfg.v_min = std::stoi(v);
+        else if (k == "model_enable") o.model_cfg.enable = parse_bool(v);
+        else if (k == "model_backend") o.model_cfg.backend = v;
+        else if (k == "model_path") o.model_cfg.path = v;
+        else if (k == "model_input_width") o.model_cfg.input_width = std::stoi(v);
+        else if (k == "model_input_height") o.model_cfg.input_height = std::stoi(v);
+        else if (k == "model_stride") o.model_cfg.stride = std::stoi(v);
     }
 }
 
 static void print_help() {
-    std::cout << "vision_app modes: probe | bench | live | deploy\n\n";
-    std::cout << "Core camera args:\n";
-    std::cout << "  --device /dev/video0\n";
-    std::cout << "  --width 640 --height 480\n";
-    std::cout << "  --fourcc MJPG\n";
-    std::cout << "  --fps 180\n";
-    std::cout << "  --buffer-size 1        small buffer, fresher frames\n";
-    std::cout << "  --latest-only 1        prefer latest frame\n";
-    std::cout << "  --drain-grabs 1        drop queued stale frames\n";
-    std::cout << "  --headless 1           no UI, best for pure bench\n";
-    std::cout << "  --duration 10          bench duration in seconds\n\n";
-    std::cout << "Live/deploy safety args:\n";
-    std::cout << "  --camera-soft-max 1000 clamp camera request if too large\n";
-    std::cout << "  --warp-soft-max 700    clamp fitted warp size for Pi safety\n";
-    std::cout << "  --preview-soft-max 500 downscale display preview only\n";
-    std::cout << "  --temp-preview-square 220 small live warp inset before lock\n";
-    std::cout << "  --temp-preview-stride 3 update inset every N frames\n\n";
-    std::cout << "AprilTag args:\n";
-    std::cout << "  --tag-family auto|16|25|36\n";
-    std::cout << "  --target-id 0\n";
-    std::cout << "  --require-target-id 1\n";
-    std::cout << "  --manual-lock-only 1\n";
-    std::cout << "  --lock-frames 4\n\n";
-    std::cout << "ROI / save-load args:\n";
-    std::cout << "  --red-roi x,y,w,h\n";
-    std::cout << "  --image-roi x,y,w,h\n";
-    std::cout << "  --save-warp PATH  --load-warp PATH\n";
-    std::cout << "  --save-rois PATH  --load-rois PATH\n";
-    std::cout << "  --save-report PATH\n\n";
-    std::cout << "Useful examples:\n";
-    std::cout << "  ./vision_app --mode probe\n";
-    std::cout << "  ./vision_app --mode bench --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --headless 1 --duration 10\n";
-    std::cout << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --require-target-id 1 --manual-lock-only 1 --warp-soft-max 700 --preview-soft-max 500\n";
-    std::cout << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml\n";
+    std::cout
+        << "vision_app modes: probe | bench | live | deploy\n\n"
+        << "Build every time with:\n"
+        << "  mkdir -p build\n"
+        << "  cd build\n"
+        << "  cmake ..\n"
+        << "  make -j$(nproc)\n\n"
+        << "Core camera args\n"
+        << "  --device /dev/video0\n"
+        << "  --width 640 --height 480\n"
+        << "  --fourcc MJPG\n"
+        << "  --fps 180\n"
+        << "  --buffer-size 1\n"
+        << "  --latest-only 1\n"
+        << "  --drain-grabs 1\n"
+        << "  --headless 1\n"
+        << "  --duration 10\n\n"
+        << "Preview / safety\n"
+        << "  --camera-soft-max 1000\n"
+        << "  --warp-soft-max 700\n"
+        << "  --camera-preview-max 640\n"
+        << "  --warp-preview-max 640\n"
+        << "  --temp-preview-square 220\n"
+        << "  --temp-preview-stride 3\n\n"
+        << "Tag args\n"
+        << "  --tag-family auto|16|25|36\n"
+        << "  --target-id 0\n"
+        << "  --require-target-id 1\n"
+        << "  --manual-lock-only 1\n"
+        << "  --lock-frames 4\n\n"
+        << "ROI args\n"
+        << "  --red-roi x,y,w,h\n"
+        << "  --image-roi x,y,w,h\n"
+        << "  ratios are in warp space, 0..1\n\n"
+        << "Red threshold args\n"
+        << "  --red-h1-low 0 --red-h1-high 10\n"
+        << "  --red-h2-low 170 --red-h2-high 180\n"
+        << "  --red-s-min 80 --red-v-min 60\n\n"
+        << "Model args\n"
+        << "  --model-enable 1\n"
+        << "  --model-backend onnx|ncnn\n"
+        << "  --model-path ../models/model.onnx\n"
+        << "  --model-input-width 224 --model-input-height 224\n"
+        << "  --model-stride 5\n\n"
+        << "Save / load\n"
+        << "  --save-warp PATH   --load-warp PATH\n"
+        << "  --save-rois PATH   --load-rois PATH\n"
+        << "  --save-report PATH\n\n"
+        << "Examples\n"
+        << "  ./vision_app --mode probe\n"
+        << "  ./vision_app --mode bench --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --headless 1 --duration 10\n"
+        << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1 --camera-preview-max 700 --warp-preview-max 700\n"
+        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend onnx --model-path ../models/model.onnx\n";
 }
 
 int main(int argc, char** argv) {
@@ -132,7 +165,9 @@ int main(int argc, char** argv) {
         else if (a == "--duration") opt.duration = std::stoi(need("--duration"));
         else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need("--camera-soft-max"));
         else if (a == "--warp-soft-max") opt.warp_soft_max = std::stoi(need("--warp-soft-max"));
-        else if (a == "--preview-soft-max") opt.preview_soft_max = std::stoi(need("--preview-soft-max"));
+        else if (a == "--preview-soft-max") { opt.preview_soft_max = std::stoi(need("--preview-soft-max")); opt.camera_preview_max = opt.preview_soft_max; opt.warp_preview_max = opt.preview_soft_max; }
+        else if (a == "--camera-preview-max") opt.camera_preview_max = std::stoi(need("--camera-preview-max"));
+        else if (a == "--warp-preview-max") opt.warp_preview_max = std::stoi(need("--warp-preview-max"));
         else if (a == "--temp-preview-square") opt.temp_preview_square = std::stoi(need("--temp-preview-square"));
         else if (a == "--temp-preview-stride") opt.temp_preview_stride = std::stoi(need("--temp-preview-stride"));
         else if (a == "--tag-family") opt.tag_family = need("--tag-family");
@@ -147,6 +182,18 @@ int main(int argc, char** argv) {
         else if (a == "--save-report") opt.save_report = need("--save-report");
         else if (a == "--red-roi") { if (!parse_roi_csv(need("--red-roi"), opt.default_rois.red_roi)) { std::cerr << "bad --red-roi\n"; return 1; } }
         else if (a == "--image-roi") { if (!parse_roi_csv(need("--image-roi"), opt.default_rois.image_roi)) { std::cerr << "bad --image-roi\n"; return 1; } }
+        else if (a == "--red-h1-low") opt.red_cfg.h1_low = std::stoi(need("--red-h1-low"));
+        else if (a == "--red-h1-high") opt.red_cfg.h1_high = std::stoi(need("--red-h1-high"));
+        else if (a == "--red-h2-low") opt.red_cfg.h2_low = std::stoi(need("--red-h2-low"));
+        else if (a == "--red-h2-high") opt.red_cfg.h2_high = std::stoi(need("--red-h2-high"));
+        else if (a == "--red-s-min") opt.red_cfg.s_min = std::stoi(need("--red-s-min"));
+        else if (a == "--red-v-min") opt.red_cfg.v_min = std::stoi(need("--red-v-min"));
+        else if (a == "--model-enable") opt.model_cfg.enable = parse_bool(need("--model-enable"));
+        else if (a == "--model-backend") opt.model_cfg.backend = need("--model-backend");
+        else if (a == "--model-path") opt.model_cfg.path = need("--model-path");
+        else if (a == "--model-input-width") opt.model_cfg.input_width = std::stoi(need("--model-input-width"));
+        else if (a == "--model-input-height") opt.model_cfg.input_height = std::stoi(need("--model-input-height"));
+        else if (a == "--model-stride") opt.model_cfg.stride = std::stoi(need("--model-stride"));
         else { std::cerr << "unknown argument: " << a << "\n"; return 1; }
     }
 
@@ -159,7 +206,7 @@ int main(int argc, char** argv) {
     }
     if (opt.mode == "bench") {
         RuntimeStats stats;
-        if (!bench_capture(opt.device, opt.width, opt.height, opt.fps, opt.fourcc, opt.buffer_size, opt.latest_only, opt.drain_grabs, opt.headless, opt.duration, opt.camera_soft_max, opt.preview_soft_max, stats, err)) {
+        if (!bench_capture(opt.device, opt.width, opt.height, opt.fps, opt.fourcc, opt.buffer_size, opt.latest_only, opt.drain_grabs, opt.headless, opt.duration, opt.camera_soft_max, opt.camera_preview_max, stats, err)) {
             std::cerr << "Bench failed: " << err << "\n"; return 1;
         }
         print_runtime_stats(stats);

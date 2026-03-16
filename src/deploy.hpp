@@ -1,10 +1,8 @@
 #pragma once
 
-#include <filesystem>
+#include <algorithm>
+#include <iostream>
 #include <string>
-
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 
 #include "camera.hpp"
 #include "calibrate.hpp"
@@ -12,12 +10,63 @@
 
 namespace vision_app {
 
+struct RedThresholdConfig {
+    int h1_low = 0;
+    int h1_high = 10;
+    int h2_low = 170;
+    int h2_high = 180;
+    int s_min = 80;
+    int v_min = 60;
+};
+
+struct ModelConfig {
+    bool enable = false;
+    std::string backend = "off";   // off | onnx | ncnn
+    std::string path;
+    int input_width = 224;
+    int input_height = 224;
+    bool swap_rb = true;
+    double scale = 1.0 / 255.0;
+    int stride = 5;
+};
+
+struct ModelResult {
+    bool ran = false;
+    bool ok = false;
+    int top_index = -1;
+    float top_score = 0.0f;
+    std::string summary;
+};
+
+struct RoiRuntimeData {
+    cv::Mat red_bgr;
+    cv::Mat red_mask;
+    cv::Mat image_bgr;
+    cv::Mat image_mask;
+    double red_ratio = 0.0;
+    int red_valid_pixels = 0;
+    int image_valid_pixels = 0;
+};
+
+bool init_model_runtime(const ModelConfig& cfg, std::string& err);
+void release_model_runtime();
+bool extract_runtime_rois(const cv::Mat& warped,
+                          const cv::Mat& valid_mask,
+                          const RoiConfig& rois,
+                          const RedThresholdConfig& red_cfg,
+                          RoiRuntimeData& out,
+                          std::string& err);
+bool run_model_on_image_roi(const RoiRuntimeData& in,
+                            const ModelConfig& cfg,
+                            ModelResult& out,
+                            std::string& err);
+
 struct AppOptions {
     std::string mode = "probe";
     std::string device = "/dev/video0";
     int width = 640;
     int height = 480;
-    int fps = 120;
+    int fps = 180;
     std::string fourcc = "MJPG";
     int buffer_size = 1;
     bool latest_only = true;
@@ -27,7 +76,9 @@ struct AppOptions {
 
     int camera_soft_max = 1000;
     int warp_soft_max = 700;
-    int preview_soft_max = 500;
+    int preview_soft_max = 500; // backward-compatible fallback
+    int camera_preview_max = 640;
+    int warp_preview_max = 640;
     int temp_preview_square = 220;
     int temp_preview_stride = 3;
 
@@ -44,33 +95,67 @@ struct AppOptions {
     std::string save_report = "../report/latest_report.md";
 
     RoiConfig default_rois;
+    RedThresholdConfig red_cfg;
+    ModelConfig model_cfg;
 };
 
-inline void draw_help_overlay(cv::Mat& img, bool locked, int selected, double move_step, double size_step) {
-    const int base_x = 12;
-    int y = img.rows - 120;
-    cv::putText(img, locked ? "LOCKED / ROI EDIT" : "SEARCHING / LIVE PREVIEW", {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(30,255,30), 2); y += 22;
-    cv::putText(img, "SPACE lock   U unlock   H help   Q quit", {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1); y += 18;
-    cv::putText(img, "1 red_roi   2 image_roi   selected=" + std::string(selected==0?"red":"image"), {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1); y += 18;
-    cv::putText(img, "WASD move   I/K height   J/L width", {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1); y += 18;
-    cv::putText(img, "[ ] move step=" + std::to_string(move_step).substr(0,5) + "   , . size step=" + std::to_string(size_step).substr(0,5), {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1); y += 18;
-    cv::putText(img, "P save all   O save rois   Y save warp   R reset", {base_x, y}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1);
+inline void print_live_controls() {
+    std::cout
+        << "\n=== vision_app live controls ===\n"
+        << "Search / lock\n"
+        << "  SPACE / ENTER : lock current tag\n"
+        << "  u             : unlock / reacquire\n"
+        << "  q / ESC       : quit\n\n"
+        << "ROI selection\n"
+        << "  1             : select red_roi\n"
+        << "  2             : select image_roi\n\n"
+        << "ROI move\n"
+        << "  w a s d       : up / left / down / right\n\n"
+        << "ROI size\n"
+        << "  i / k         : height - / +\n"
+        << "  j / l         : width  - / +\n\n"
+        << "Step control\n"
+        << "  [ / ]         : move step down / up\n"
+        << "  , / .         : size step down / up\n\n"
+        << "Save\n"
+        << "  p             : save all\n"
+        << "  y             : save warp only\n"
+        << "  o             : save rois only\n"
+        << "  r             : reset rois\n"
+        << std::flush;
 }
 
-inline cv::Mat make_temp_live_preview(const cv::Mat& frame,
-                                      const AprilTagDetection& det,
-                                      int temp_square,
-                                      int warp_soft_max) {
-    if (!det.found) return cv::Mat();
-    WarpPackage temp_pack;
-    std::string err;
-    if (!build_warp_package_from_detection(det, frame.size(), std::min(temp_square, warp_soft_max), temp_pack, err)) return cv::Mat();
-    cv::Mat warped, valid;
-    if (!apply_warp(frame, temp_pack, warped, &valid)) return cv::Mat();
-    cv::Mat show;
-    if (warped.channels()==1) cv::cvtColor(warped, show, cv::COLOR_GRAY2BGR);
-    else show = warped;
-    return show;
+inline void print_status_to_terminal(bool locked,
+                                     const AprilTagDetection& cur,
+                                     int selected,
+                                     double move_step,
+                                     double size_step,
+                                     const RoiRuntimeData* roi_info,
+                                     const ModelResult* model_res) {
+    std::cout << "\r[" << (locked ? "LOCKED" : "SEARCH") << "] ";
+    if (cur.found) {
+        std::cout << "tag family=" << cur.family << " id=" << cur.id << "  ";
+    } else {
+        std::cout << "tag none  ";
+    }
+    std::cout << "roi=" << (selected == 0 ? "red" : "image")
+              << " move=" << move_step
+              << " size=" << size_step;
+    if (roi_info) {
+        std::cout << " red_ratio=" << roi_info->red_ratio
+                  << " red_valid=" << roi_info->red_valid_pixels
+                  << " image_valid=" << roi_info->image_valid_pixels;
+    }
+    if (model_res && model_res->ran) {
+        std::cout << " model=" << model_res->summary;
+    }
+    std::cout << "        " << std::flush;
+}
+
+inline cv::Mat make_blank_preview(int side, const std::string& text) {
+    cv::Mat img(std::max(64, side), std::max(64, side), CV_8UC3, cv::Scalar(235,235,235));
+    cv::putText(img, text, {16, img.rows / 2}, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(60,60,60), 2);
+    return img;
 }
 
 inline bool run_live(const AppOptions& opt, std::string& err) {
@@ -79,25 +164,48 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
     if (!open_capture(cap, opt.device, cam_w, cam_h, opt.fps, opt.fourcc, opt.buffer_size, opt.camera_soft_max, err)) return false;
 
     RoiConfig rois = opt.default_rois;
-    (void)load_rois_yaml(opt.load_rois, rois); // optional
+    (void)load_rois_yaml(opt.load_rois, rois);
 
-    AprilTagConfig tag_cfg; tag_cfg.family = opt.tag_family; tag_cfg.target_id = opt.target_id; tag_cfg.require_target_id = opt.require_target_id; tag_cfg.manual_lock_only = opt.manual_lock_only; tag_cfg.lock_frames = opt.lock_frames;
+    bool model_ready = false;
+    if (opt.model_cfg.enable && opt.model_cfg.backend != "off" && !opt.model_cfg.path.empty()) {
+        std::string merr;
+        model_ready = init_model_runtime(opt.model_cfg, merr);
+        if (!model_ready) std::cerr << "\n[model] disabled: " << merr << "\n";
+    }
+
+    AprilTagConfig tag_cfg;
+    tag_cfg.family = opt.tag_family;
+    tag_cfg.target_id = opt.target_id;
+    tag_cfg.require_target_id = opt.require_target_id;
+    tag_cfg.manual_lock_only = opt.manual_lock_only;
+    tag_cfg.lock_frames = opt.lock_frames;
     TagLocker locker(opt.lock_frames);
 
     bool locked = false;
-    bool show_help = true;
     int selected = 0;
     double move_step = 0.01;
     double size_step = 0.01;
     int frame_idx = 0;
+    int last_print_tag = -999999;
+    std::string last_print_family;
     AprilTagDetection cur, locked_det;
     WarpPackage locked_pack;
-    cv::Mat frame, display, temp_preview, warped, valid;
+    ModelResult model_res;
+    RoiRuntimeData roi_info;
+    cv::Mat frame, camera_show, warp_show, temp_preview, warped, valid;
 
-    cv::namedWindow("vision_app", cv::WINDOW_AUTOSIZE);
+    cv::namedWindow("vision_app_camera", cv::WINDOW_NORMAL);
+    cv::namedWindow("vision_app_warp", cv::WINDOW_NORMAL);
+    cv::resizeWindow("vision_app_camera", opt.camera_preview_max, opt.camera_preview_max * 3 / 4);
+    cv::resizeWindow("vision_app_warp", opt.warp_preview_max, opt.warp_preview_max);
+
+    print_live_controls();
 
     while (true) {
-        if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; return false; }
+        if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) {
+            err = "failed to read frame";
+            break;
+        }
 
         if (!locked) {
             std::string derr;
@@ -107,57 +215,104 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
                 if (build_warp_package_from_detection(cur, frame.size(), opt.warp_soft_max, locked_pack, err)) {
                     locked = true;
                     locked_det = cur;
+                    std::cout << "\n[lock] auto lock family=" << locked_det.family << " id=" << locked_det.id << "\n";
                 }
                 err.clear();
             }
 
-            cv::Mat raw = frame.clone();
-            draw_detection_overlay(raw, cur);
-            std::string status = cur.found ? ("SEARCH family=" + cur.family + " id=" + std::to_string(cur.id) + " [SPACE lock]") : "SEARCH no tag";
-            cv::putText(raw, status, {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.62, cv::Scalar(0,255,255), 2);
+            camera_show = frame.clone();
+            draw_detection_overlay(camera_show, cur);
+            cv::putText(camera_show,
+                        cur.found ? "SEARCH: press SPACE to lock" : "SEARCH: no tag",
+                        {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.62, cv::Scalar(0,255,255), 2);
+            camera_show = downscale_for_preview(camera_show, opt.camera_preview_max);
 
-            if (cur.found && (frame_idx % std::max(1,opt.temp_preview_stride) == 0)) {
-                temp_preview = make_temp_live_preview(frame, cur, opt.temp_preview_square, opt.warp_soft_max);
-            }
-            if (!temp_preview.empty()) {
-                cv::Mat inset = downscale_for_preview(temp_preview, opt.temp_preview_square);
-                const int pad = 10;
-                if (raw.cols > inset.cols + 2*pad && raw.rows > inset.rows + 2*pad) {
-                    cv::Rect dst(raw.cols - inset.cols - pad, pad, inset.cols, inset.rows);
-                    inset.copyTo(raw(dst));
-                    cv::rectangle(raw, dst, cv::Scalar(255,255,255), 2);
-                    cv::putText(raw, "live warp preview", {dst.x, std::max(18, dst.y-4)}, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255,255,255), 1);
+            if (cur.found && (frame_idx % std::max(1, opt.temp_preview_stride) == 0)) {
+                WarpPackage temp_pack;
+                std::string werr;
+                if (build_warp_package_from_detection(cur, frame.size(), std::min(opt.temp_preview_square, opt.warp_soft_max), temp_pack, werr)) {
+                    cv::Mat temp_valid;
+                    if (apply_warp(frame, temp_pack, temp_preview, &temp_valid)) {
+                        const cv::Rect rr = roi_to_rect(rois.red_roi, temp_preview.size());
+                        const cv::Rect ir = roi_to_rect(rois.image_roi, temp_preview.size());
+                        cv::rectangle(temp_preview, rr, cv::Scalar(0,0,255), 2);
+                        cv::rectangle(temp_preview, ir, cv::Scalar(255,0,0), 2);
+                    }
                 }
             }
-            display = downscale_for_preview(raw, opt.preview_soft_max);
-            if (show_help) draw_help_overlay(display, false, selected, move_step, size_step);
+            if (temp_preview.empty()) {
+                warp_show = make_blank_preview(opt.temp_preview_square, "warp preview waiting for tag");
+            } else {
+                warp_show = temp_preview.clone();
+            }
+            warp_show = downscale_for_preview(warp_show, opt.warp_preview_max);
         } else {
-            if (!apply_warp(frame, locked_pack, warped, &valid)) { err = "failed to apply locked warp"; return false; }
-            cv::Mat show = warped.clone();
-            draw_rois(show, rois, selected);
-            const std::string status = "LOCKED family=" + locked_pack.family + " id=" + std::to_string(locked_pack.id);
-            cv::putText(show, status, {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,255,0), 2);
-            const cv::Rect rr = roi_to_rect(rois.red_roi, show.size());
-            const cv::Rect ir = roi_to_rect(rois.image_roi, show.size());
-            const double red_valid = static_cast<double>(cv::countNonZero(valid(rr))) / static_cast<double>(rr.area());
-            const double img_valid = static_cast<double>(cv::countNonZero(valid(ir))) / static_cast<double>(ir.area());
-            cv::putText(show, "red valid=" + std::to_string(red_valid).substr(0,4) + " image valid=" + std::to_string(img_valid).substr(0,4), {12, 54}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,0), 2);
-            display = downscale_for_preview(show, opt.preview_soft_max);
-            if (show_help) draw_help_overlay(display, true, selected, move_step, size_step);
+            cur = locked_det;
+            if (!apply_warp(frame, locked_pack, warped, &valid)) {
+                err = "failed to apply locked warp";
+                break;
+            }
+            camera_show = frame.clone();
+            draw_detection_overlay(camera_show, locked_det);
+            cv::putText(camera_show, "LOCKED", {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.62, cv::Scalar(0,255,0), 2);
+            camera_show = downscale_for_preview(camera_show, opt.camera_preview_max);
+
+            warp_show = warped.clone();
+            draw_rois(warp_show, rois, selected);
+            cv::putText(warp_show,
+                        "LOCKED family=" + locked_pack.family + " id=" + std::to_string(locked_pack.id),
+                        {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,255,0), 2);
+
+            std::string rerr;
+            if (extract_runtime_rois(warped, valid, rois, opt.red_cfg, roi_info, rerr)) {
+                if (model_ready && (frame_idx % std::max(1, opt.model_cfg.stride) == 0)) {
+                    std::string merr;
+                    if (!run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
+                        model_res = {};
+                        model_res.ran = true;
+                        model_res.summary = "model err";
+                    }
+                }
+                cv::putText(warp_show,
+                            "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5),
+                            {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,0), 2);
+                if (model_res.ran) {
+                    cv::putText(warp_show, model_res.summary, {12, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,0), 1);
+                }
+            }
+            warp_show = downscale_for_preview(warp_show, opt.warp_preview_max);
         }
 
-        cv::imshow("vision_app", display);
+        cv::imshow("vision_app_camera", camera_show);
+        cv::imshow("vision_app_warp", warp_show);
+
+        if (cur.found && (cur.id != last_print_tag || cur.family != last_print_family)) {
+            std::cout << "\n[tag] family=" << cur.family << " id=" << cur.id << (locked ? " [locked]" : "") << "\n";
+            last_print_tag = cur.id;
+            last_print_family = cur.family;
+        }
+        print_status_to_terminal(locked, cur, selected, move_step, size_step, locked ? &roi_info : nullptr, locked ? &model_res : nullptr);
+
         ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
         if (key == 27 || key == 'q') break;
-        if (key == 'h') show_help = !show_help;
-        if (key == 'u') { locked = false; locker.reset(); locked_pack = {}; temp_preview.release(); }
-        if (key == ' ' || key == 13) {
+        if (key == 'u') {
+            locked = false;
+            locker.reset();
+            locked_pack = {};
+            temp_preview.release();
+            model_res = {};
+            std::cout << "\n[lock] released\n";
+        }
+        if (key == ' ') {
             if (cur.found) {
                 if (build_warp_package_from_detection(cur, frame.size(), opt.warp_soft_max, locked_pack, err)) {
-                    locked = true; locked_det = cur;
+                    locked = true;
+                    locked_det = cur;
+                    std::cout << "\n[lock] manual lock family=" << locked_det.family << " id=" << locked_det.id << "\n";
                 } else {
-                    std::cerr << "Warp build rejected: " << err << "\n"; err.clear();
+                    std::cerr << "\n[lock] rejected: " << err << "\n";
+                    err.clear();
                 }
             }
         }
@@ -167,52 +322,102 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
         if (key == ']') move_step = std::min(0.25, move_step * 2.0);
         if (key == ',') size_step = std::max(0.001, size_step * 0.5);
         if (key == '.') size_step = std::min(0.25, size_step * 2.0);
-        if (key == 'r') rois = opt.default_rois;
+        if (key == 'r') {
+            rois = opt.default_rois;
+            std::cout << "\n[roi] reset to defaults\n";
+        }
         if (locked) {
             if (selected == 0) adjust_roi(rois.red_roi, key, move_step, size_step);
             else adjust_roi(rois.image_roi, key, move_step, size_step);
         }
-        if (key == 'o') save_rois_yaml(opt.save_rois, rois);
-        if (key == 'y' && locked) save_warp_package(opt.save_warp, locked_pack);
+        if (key == 'o') {
+            if (save_rois_yaml(opt.save_rois, rois)) std::cout << "\n[save] rois -> " << opt.save_rois << "\n";
+        }
+        if (key == 'y' && locked) {
+            if (save_warp_package(opt.save_warp, locked_pack)) std::cout << "\n[save] warp -> " << opt.save_warp << "\n";
+        }
         if (key == 'p' && locked) {
             save_rois_yaml(opt.save_rois, rois);
             save_warp_package(opt.save_warp, locked_pack);
             write_report_md(opt.save_report, "Calibration Report", nullptr,
                             std::string("- Locked family: ") + locked_pack.family + "\n" +
                             "- Locked id: " + std::to_string(locked_pack.id) + "\n" +
-                            "- Warp size: " + std::to_string(locked_pack.warp_size.width) + "x" + std::to_string(locked_pack.warp_size.height));
+                            "- Warp size: " + std::to_string(locked_pack.warp_size.width) + "x" + std::to_string(locked_pack.warp_size.height) + "\n" +
+                            "- red_roi ratio: " + std::to_string(rois.red_roi.x) + "," + std::to_string(rois.red_roi.y) + "," + std::to_string(rois.red_roi.w) + "," + std::to_string(rois.red_roi.h) + "\n" +
+                            "- image_roi ratio: " + std::to_string(rois.image_roi.x) + "," + std::to_string(rois.image_roi.y) + "," + std::to_string(rois.image_roi.w) + "," + std::to_string(rois.image_roi.h));
+            std::cout << "\n[save] all -> " << opt.save_warp << " ; " << opt.save_rois << " ; " << opt.save_report << "\n";
         }
     }
 
+    release_model_runtime();
     cv::destroyAllWindows();
-    return true;
+    std::cout << "\n";
+    return err.empty();
 }
 
 inline bool run_deploy(const AppOptions& opt, std::string& err) {
     WarpPackage pack;
-    if (!load_warp_package(opt.load_warp, pack)) { err = "failed to load warp package: " + opt.load_warp; return false; }
+    if (!load_warp_package(opt.load_warp, pack)) {
+        err = "failed to load warp package: " + opt.load_warp;
+        return false;
+    }
     RoiConfig rois = opt.default_rois;
     (void)load_rois_yaml(opt.load_rois, rois);
+
+    bool model_ready = false;
+    if (opt.model_cfg.enable && opt.model_cfg.backend != "off" && !opt.model_cfg.path.empty()) {
+        std::string merr;
+        model_ready = init_model_runtime(opt.model_cfg, merr);
+        if (!model_ready) std::cerr << "\n[model] disabled: " << merr << "\n";
+    }
 
     int cam_w = opt.width, cam_h = opt.height;
     cv::VideoCapture cap;
     if (!open_capture(cap, opt.device, cam_w, cam_h, opt.fps, opt.fourcc, opt.buffer_size, opt.camera_soft_max, err)) return false;
 
-    cv::Mat frame, warped, valid, display;
-    cv::namedWindow("vision_app", cv::WINDOW_AUTOSIZE);
+    cv::Mat frame, warped, valid, camera_show, warp_show;
+    RoiRuntimeData roi_info;
+    ModelResult model_res;
+    cv::namedWindow("vision_app_camera", cv::WINDOW_NORMAL);
+    cv::namedWindow("vision_app_warp", cv::WINDOW_NORMAL);
+    cv::resizeWindow("vision_app_camera", opt.camera_preview_max, opt.camera_preview_max * 3 / 4);
+    cv::resizeWindow("vision_app_warp", opt.warp_preview_max, opt.warp_preview_max);
+    std::cout << "\n=== vision_app deploy ===\n"
+              << "q / ESC quit\n"
+              << "loaded warp: " << opt.load_warp << "\n"
+              << "loaded rois: " << opt.load_rois << "\n";
+
+    int frame_idx = 0;
     while (true) {
-        if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; return false; }
-        if (!apply_warp(frame, pack, warped, &valid)) { err = "failed to apply warp"; return false; }
-        cv::Mat show = warped.clone();
-        draw_rois(show, rois, -1);
-        cv::putText(show, "DEPLOY family=" + pack.family + " id=" + std::to_string(pack.id), {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,255,0), 2);
-        display = downscale_for_preview(show, opt.preview_soft_max);
-        cv::imshow("vision_app", display);
+        if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; break; }
+        if (!apply_warp(frame, pack, warped, &valid)) { err = "failed to apply warp"; break; }
+        camera_show = downscale_for_preview(frame, opt.camera_preview_max);
+        warp_show = warped.clone();
+        draw_rois(warp_show, rois, -1);
+        cv::putText(warp_show, "DEPLOY family=" + pack.family + " id=" + std::to_string(pack.id), {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,255,0), 2);
+        std::string rerr;
+        if (extract_runtime_rois(warped, valid, rois, opt.red_cfg, roi_info, rerr)) {
+            cv::putText(warp_show, "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5), {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,0), 2);
+            if (model_ready && (frame_idx % std::max(1, opt.model_cfg.stride) == 0)) {
+                std::string merr;
+                if (run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
+                    cv::putText(warp_show, model_res.summary, {12, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,0), 1);
+                }
+            }
+        }
+        warp_show = downscale_for_preview(warp_show, opt.warp_preview_max);
+        cv::imshow("vision_app_camera", camera_show);
+        cv::imshow("vision_app_warp", warp_show);
+        print_status_to_terminal(true, AprilTagDetection{true, pack.family, pack.id}, 1, 0.0, 0.0, &roi_info, &model_res);
+        ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
         if (key == 27 || key == 'q') break;
     }
+
+    release_model_runtime();
     cv::destroyAllWindows();
-    return true;
+    std::cout << "\n";
+    return err.empty();
 }
 
 } // namespace vision_app

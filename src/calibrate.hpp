@@ -158,6 +158,7 @@ inline bool save_rois_yaml(const std::string& path, const RoiConfig& rois) {
 }
 
 inline bool load_rois_yaml(const std::string& path, RoiConfig& rois) {
+    if (!std::filesystem::exists(path)) return false;
     cv::FileStorage fs(path, cv::FileStorage::READ);
     if (!fs.isOpened()) return false;
     auto read_roi = [](const cv::FileNode& n, RoiRatio& r) {
@@ -217,19 +218,22 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
     if (Hinv.empty()) { err = "homography inversion failed"; return false; }
 
     cv::Mat mapx(out_h, out_w, CV_32FC1), mapy(out_h, out_w, CV_32FC1), valid(out_h, out_w, CV_8UC1, cv::Scalar(0));
+    const cv::Matx33d Hinvx(
+        Hinv.at<double>(0,0), Hinv.at<double>(0,1), Hinv.at<double>(0,2),
+        Hinv.at<double>(1,0), Hinv.at<double>(1,1), Hinv.at<double>(1,2),
+        Hinv.at<double>(2,0), Hinv.at<double>(2,1), Hinv.at<double>(2,2));
     for (int y = 0; y < out_h; ++y) {
         for (int x = 0; x < out_w; ++x) {
-            cv::Matx33d M = Hinv;
-            cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
-            cv::Vec3d p = M * v;
-            double w = p[2];
-            if (std::abs(w) < 1e-12) {
+            const cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
+            const cv::Vec3d p = Hinvx * v;
+            const double w = p[2];
+            if (!std::isfinite(w) || std::abs(w) < 1e-12) {
                 mapx.at<float>(y,x) = -1.0f; mapy.at<float>(y,x) = -1.0f; continue;
             }
             const double sx = p[0] / w, sy = p[1] / w;
             mapx.at<float>(y,x) = static_cast<float>(sx);
             mapy.at<float>(y,x) = static_cast<float>(sy);
-            if (sx >= 0.0 && sy >= 0.0 && sx < src_size.width && sy < src_size.height) valid.at<unsigned char>(y,x) = 255;
+            if (std::isfinite(sx) && std::isfinite(sy) && sx >= 0.0 && sy >= 0.0 && sx < src_size.width && sy < src_size.height) valid.at<unsigned char>(y,x) = 255;
         }
     }
     cv::Mat map1, map2;
@@ -273,6 +277,7 @@ inline bool save_warp_package(const std::string& path, const WarpPackage& pack) 
 }
 
 inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
+    if (!std::filesystem::exists(path)) return false;
     cv::FileStorage fs(path, cv::FileStorage::READ);
     if (!fs.isOpened()) return false;
     pack = {};
