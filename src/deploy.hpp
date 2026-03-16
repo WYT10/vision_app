@@ -82,6 +82,7 @@ struct AppOptions {
     int temp_preview_square = 260;
     int temp_preview_stride = 3;
     double tag_fill_ratio = 0.70;
+    double tag_size_mm = 120.0;
 
     std::string tag_family = "auto";
     int target_id = 0;
@@ -101,64 +102,69 @@ struct AppOptions {
 };
 
 inline void print_live_controls() {
-    std::cout
-        << "\n=== vision_app live controls ===\n"
-        << "Build every time with:\n"
-        << "  mkdir -p build\n"
-        << "  cd build\n"
-        << "  cmake ..\n"
-        << "  make -j$(nproc)\n\n"
-        << "Windows\n"
-        << "  vision_app_camera : raw feed + tag overlay\n"
-        << "  vision_app_warp   : centered warp + ROIs + empty white area\n\n"
-        << "Search / lock\n"
-        << "  SPACE / ENTER : lock current tag\n"
-        << "  u             : unlock / reacquire\n"
-        << "  q / ESC       : quit\n\n"
-        << "ROI selection\n"
-        << "  1             : select red_roi\n"
-        << "  2             : select image_roi\n\n"
-        << "ROI move\n"
-        << "  w a s d       : up / left / down / right\n\n"
-        << "ROI size\n"
-        << "  i / k         : height - / +\n"
-        << "  j / l         : width  - / +\n\n"
-        << "Step control\n"
-        << "  [ / ]         : move step down / up\n"
-        << "  , / .         : size step down / up\n\n"
-        << "Save\n"
-        << "  p             : save all\n"
-        << "  y             : save warp only\n"
-        << "  o             : save rois only\n"
-        << "  r             : reset rois\n"
-        << std::flush;
+    std::cout << R"TXT(
+=== vision_app live controls ===
+Build every time with:
+  mkdir -p build
+  cd build
+  cmake ..
+  make -j$(nproc)
+
+Windows
+  vision_app_camera : raw feed + tag overlay
+  vision_app_warp   : warp preview + ROIs + white invalid area
+
+Keys
+  SPACE / ENTER : lock current tag
+  u             : unlock / reacquire
+  1 / 2         : select red_roi / image_roi
+  w a s d       : move ROI
+  i / k         : height - / +
+  j / l         : width  - / +
+  [ / ]         : move step down / up
+  , / .         : size step down / up
+  p             : save all
+  y             : save warp only
+  o             : save rois only
+  r             : reset rois
+  q / ESC       : quit
+
+Status line example
+  CAM 640x480 MJPG @120 | TAG 36 id=0 | LOCK yes | WARP centered | TAG_SIZE 120mm
+)TXT" << std::flush;
 }
 
-inline void print_status_to_terminal(bool locked,
+inline void print_status_to_terminal(int cam_w,
+                                     int cam_h,
+                                     const std::string& fourcc,
+                                     int fps_req,
+                                     bool locked,
                                      const AprilTagDetection& cur,
                                      int selected,
                                      double move_step,
                                      double size_step,
                                      double fill_ratio,
+                                     double tag_size_mm,
                                      const RoiRuntimeData* roi_info,
                                      const ModelResult* model_res) {
-    std::cout << "\r[" << (locked ? "LOCKED" : "SEARCH") << "] ";
-    if (cur.found) {
-        std::cout << "tag family=" << cur.family << " id=" << cur.id << "  ";
-    } else {
-        std::cout << "tag none  ";
-    }
-    std::cout << "roi=" << (selected == 0 ? "red" : "image")
-              << " move=" << move_step
-              << " size=" << size_step
-              << " fill=" << fill_ratio;
+    std::cout << "\rCAM " << cam_w << "x" << cam_h << " " << fourcc << " @" << fps_req
+              << " | TAG ";
+    if (cur.found) std::cout << cur.family << " id=" << cur.id;
+    else std::cout << "none";
+    std::cout << " | LOCK " << (locked ? "yes" : "no")
+              << " | WARP centered"
+              << " | TAG_SIZE " << static_cast<int>(std::lround(tag_size_mm)) << "mm"
+              << " | ROI " << (selected == 0 ? "red" : "image")
+              << " | mv " << move_step
+              << " sz " << size_step
+              << " fill " << fill_ratio;
     if (roi_info) {
-        std::cout << " red_ratio=" << roi_info->red_ratio
-                  << " red_valid=" << roi_info->red_valid_pixels
-                  << " image_valid=" << roi_info->image_valid_pixels;
+        std::cout << " | red_ratio " << roi_info->red_ratio
+                  << " rv " << roi_info->red_valid_pixels
+                  << " iv " << roi_info->image_valid_pixels;
     }
     if (model_res && model_res->ran) {
-        std::cout << " model=" << model_res->summary;
+        std::cout << " | model " << model_res->summary;
     }
     std::cout << "        " << std::flush;
 }
@@ -326,7 +332,7 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
             last_print_tag = cur.id;
             last_print_family = cur.family;
         }
-        print_status_to_terminal(locked, cur, selected, move_step, size_step, opt.tag_fill_ratio, locked ? &roi_info : nullptr, locked ? &model_res : nullptr);
+        print_status_to_terminal(cam_w, cam_h, opt.fourcc, opt.fps, locked, cur, selected, move_step, size_step, opt.tag_fill_ratio, opt.tag_size_mm, locked ? &roi_info : nullptr, locked ? &model_res : nullptr);
 
         ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
@@ -449,7 +455,7 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         warp_show = downscale_for_preview(warp_show, opt.warp_preview_max);
         cv::imshow("vision_app_camera", camera_show);
         cv::imshow("vision_app_warp", warp_show);
-        print_status_to_terminal(true, AprilTagDetection{true, pack.family, pack.id}, 1, 0.0, 0.0, pack.tag_fill_ratio, &roi_info, &model_res);
+        print_status_to_terminal(cam_w, cam_h, opt.fourcc, opt.fps, true, AprilTagDetection{true, pack.family, pack.id}, 1, 0.0, 0.0, pack.tag_fill_ratio, opt.tag_size_mm, &roi_info, &model_res);
         ++frame_idx;
         const int key = cv::waitKey(1) & 0xFF;
         if (key == 27 || key == 'q') break;

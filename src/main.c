@@ -59,6 +59,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "temp_preview_square") o.temp_preview_square = std::stoi(v);
         else if (k == "temp_preview_stride") o.temp_preview_stride = std::stoi(v);
         else if (k == "tag_fill_ratio") o.tag_fill_ratio = std::stod(v);
+        else if (k == "tag_size_mm") o.tag_size_mm = std::stod(v);
         else if (k == "tag_family") o.tag_family = v;
         else if (k == "target_id") o.target_id = std::stoi(v);
         else if (k == "require_target_id") o.require_target_id = parse_bool(v);
@@ -114,6 +115,7 @@ static void print_help() {
         << "Tag args\n"
         << "  --tag-family auto|16|25|36\n"
         << "  --tag-fill-ratio 0.70\n"
+        << "  --tag-size-mm 120\n"
         << "  --target-id 0\n"
         << "  --require-target-id 1\n"
         << "  --manual-lock-only 1\n"
@@ -173,6 +175,7 @@ int main(int argc, char** argv) {
         else if (a == "--temp-preview-square") opt.temp_preview_square = std::stoi(need("--temp-preview-square"));
         else if (a == "--temp-preview-stride") opt.temp_preview_stride = std::stoi(need("--temp-preview-stride"));
         else if (a == "--tag-fill-ratio") opt.tag_fill_ratio = std::stod(need("--tag-fill-ratio"));
+        else if (a == "--tag-size-mm") opt.tag_size_mm = std::stod(need("--tag-size-mm"));
         else if (a == "--tag-family") opt.tag_family = need("--tag-family");
         else if (a == "--target-id") opt.target_id = std::stoi(need("--target-id"));
         else if (a == "--require-target-id") opt.require_target_id = parse_bool(need("--require-target-id"));
