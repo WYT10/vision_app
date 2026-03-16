@@ -65,7 +65,7 @@ static bool load_config_file(const std::string& path,
         else if (key == "duration_sec") cam.duration_sec = std::stoi(val);
         else if (key == "preview") cam.preview = parse_bool(val);
         else if (key == "headless") cam.headless = parse_bool(val);
-        else if (key == "tag_family") tag.family = val;
+        else if (key == "tag_family") tag.family = normalize_tag_family(val);
         else if (key == "target_id") tag.target_id = std::stoi(val);
         else if (key == "require_target_id") tag.require_target_id = parse_bool(val);
         else if (key == "lock_frames") tag.lock_frames = std::stoi(val);
@@ -93,37 +93,77 @@ static void print_help() {
     std::cout
         << "vision_app (5-module layout: camera / calibrate / stats / deploy / main)\n\n"
         << "Modes:\n"
-        << "  --mode probe    Probe camera modes and write probe CSV\n"
-        << "  --mode bench    Timed capture benchmark only\n"
-        << "  --mode live     Live AprilTag detect -> lock -> warp preview -> ROI edit\n"
-        << "  --mode deploy   Load saved homography + ROIs and run warp directly\n\n"
+        << "  --mode probe    Enumerate camera formats/resolutions via v4l2-ctl and write\n"
+        << "                  a CSV summary. Useful for picking --fourcc / --width / --fps.\n"
+        << "  --mode bench    Timed capture benchmark: opens the camera, grabs frames for\n"
+        << "                  --duration seconds, then prints FPS / latency statistics and\n"
+        << "                  appends one row to the test CSV. No AprilTag detection runs.\n"
+        << "                  Use --headless 1 for a clean server-side run, or\n"
+        << "                  --preview 1 to watch the stream while benchmarking.\n"
+        << "  --mode live     Live AprilTag detect -> auto-lock -> stable warp preview ->\n"
+        << "                  interactive ROI edit. A warp preview is shown continuously\n"
+        << "                  even before the tag locks so you can frame the shot. Once\n"
+        << "                  the tag is stable for --lock-frames frames the homography\n"
+        << "                  locks. Drag ROI boxes with the mouse or nudge with keys.\n"
+        << "  --mode deploy   Load a previously saved homography + ROIs and run the warp\n"
+        << "                  directly without any tag detection.\n\n"
         << "Camera arguments:\n"
-        << "  --device /dev/video0\n"
-        << "  --width 1280 --height 720 --fps 30 --fourcc MJPG\n"
-        << "  --buffer-size 1 --latest-only 1 --drain-grabs 2\n"
-        << "  --warmup 8 --duration 10\n"
-        << "  --headless 0 --preview 1\n\n"
+        << "  --device /dev/video0         V4L2 device path\n"
+        << "  --width  1280                Requested frame width  (camera may round)\n"
+        << "  --height 720                 Requested frame height (camera may round)\n"
+        << "  --fps    30                  Requested capture frame rate\n"
+        << "  --fourcc MJPG               Four-character pixel format (MJPG, YUYV, …)\n"
+        << "  --buffer-size 1             V4L2 kernel buffer count (1 = minimal latency)\n"
+        << "  --latest-only 1             Drain stale frames before decode (recommended)\n"
+        << "  --drain-grabs 2             Extra grab() calls to discard buffered frames\n"
+        << "  --warmup 8                  Frames to discard at startup before measuring\n"
+        << "  --duration 10               Seconds to run bench/live (0 = run until 'q')\n"
+        << "  --headless 0                Set 1 to disable all OpenCV windows\n"
+        << "  --preview  1                Set 0 to suppress the raw-camera preview window\n\n"
         << "AprilTag arguments:\n"
-        << "  --tag-family tag36h11\n"
-        << "  --target-id 0 --require-target-id 1\n"
-        << "  --lock-frames 8\n"
-        << "  --max-center-jitter 3.0 --max-corner-jitter 4.0\n"
-        << "  --min-quad-area-ratio 0.0025\n\n"
+        << "  --tag-family <family>        Tag family to detect. Supported values:\n"
+        << "                                 auto      – try all families, pick largest hit\n"
+        << "                                 36 / tag36h11  – Tag36h11 (default, most robust)\n"
+        << "                                 25 / tag25h9   – Tag25h9  (smaller payload)\n"
+        << "                                 16 / tag16h5   – Tag16h5  (fewest bits, fastest)\n"
+        << "                                 36h10 / tag36h10 – Tag36h10 (legacy)\n"
+        << "                               Short forms (16, 25, 36) are normalised automatically.\n"
+        << "  --target-id 0               Marker ID to track (-1 = any ID, if require-target-id=0)\n"
+        << "  --require-target-id 1       Reject detections whose ID != target-id\n"
+        << "  --lock-frames 8             Consecutive stable frames needed to confirm a lock\n"
+        << "  --max-center-jitter 3.0     Max center-point drift (px) across lock-frames window\n"
+        << "  --max-corner-jitter 4.0     Max per-corner drift (px) across lock-frames window\n"
+        << "  --min-quad-area-ratio 0.0025 Tag must cover at least this fraction of frame area\n\n"
         << "Warp/ROI/report arguments:\n"
-        << "  --warp-width 1280 --warp-height 720\n"
-        << "  --red-roi 0.05,0.10,0.20,0.20\n"
-        << "  --image-roi 0.30,0.10,0.50,0.60\n"
-        << "  --save-h ../report/warp_h.json --load-h ../report/warp_h.json\n"
-        << "  --save-rois ../report/rois.json --load-rois ../report/rois.json\n"
-        << "  --save-probe-csv ../report/probe_table.csv\n"
-        << "  --save-test-csv ../report/test_results.csv\n"
-        << "  --save-report-md ../report/latest_report.md\n"
-        << "  --config ../vision_app.conf\n\n"
+        << "  --warp-width  1280  --warp-height 720\n"
+        << "                              Output resolution of the warped (perspective-corrected)\n"
+        << "                              image. ROI ratios are expressed in this coordinate space.\n"
+        << "  --red-roi   x,y,w,h         Red ROI as normalised ratios in [0,1] (default: 0.05,0.10,0.20,0.20)\n"
+        << "  --image-roi x,y,w,h         Image ROI as normalised ratios in [0,1] (default: 0.30,0.10,0.50,0.60)\n"
+        << "  --save-h    ../report/warp_h.json    Path to write homography JSON\n"
+        << "  --load-h    ../report/warp_h.json    Path to read  homography JSON (enables auto-load)\n"
+        << "  --save-rois ../report/rois.json      Path to write ROI JSON\n"
+        << "  --load-rois ../report/rois.json      Path to read  ROI JSON (enables auto-load)\n"
+        << "  --save-probe-csv  ../report/probe_table.csv\n"
+        << "  --save-test-csv   ../report/test_results.csv\n"
+        << "  --save-report-md  ../report/latest_report.md\n"
+        << "  --save-snapshots 1          Enable warped-frame snapshot capture (key: c)\n"
+        << "  --snapshot-dir   ../report  Directory for snapshot PNGs\n"
+        << "  --config ../vision_app.conf Load settings from a .conf file (key=value format)\n\n"
         << "Examples:\n"
-        << "  ./vision_app --mode probe\n"
-        << "  ./vision_app --mode bench --width 1280 --height 720 --fps 30 --fourcc MJPG --headless 1\n"
-        << "  ./vision_app --mode live --tag-family tag36h11 --target-id 0 --warp-width 1280 --warp-height 720\n"
-        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json\n";
+        << "  # List available camera modes\n"
+        << "  ./vision_app --mode probe\n\n"
+        << "  # Benchmark at 1080p MJPG for 15 s, no display\n"
+        << "  ./vision_app --mode bench --width 1920 --height 1080 --fps 30 --fourcc MJPG \\\n"
+        << "               --duration 15 --headless 1\n\n"
+        << "  # Live mode: auto-detect any AprilTag family, warp to 1280x720\n"
+        << "  ./vision_app --mode live --tag-family auto --warp-width 1280 --warp-height 720\n\n"
+        << "  # Live mode: look for Tag25h9 marker ID 3, tighter jitter thresholds\n"
+        << "  ./vision_app --mode live --tag-family 25 --target-id 3 \\\n"
+        << "               --max-center-jitter 2.0 --max-corner-jitter 3.0\n\n"
+        << "  # Deploy (no detection): load saved homography and ROIs\n"
+        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json \\\n"
+        << "               --load-rois ../report/rois.json\n";
 }
 
 } // namespace
@@ -167,7 +207,7 @@ int main(int argc, char** argv) {
             else if (a == "--duration") cam.duration_sec = std::stoi(need("--duration"));
             else if (a == "--preview") cam.preview = parse_bool(need("--preview"));
             else if (a == "--headless") { cam.headless = parse_bool(need("--headless")); if (cam.headless) cam.preview = false; }
-            else if (a == "--tag-family") tag.family = need("--tag-family");
+            else if (a == "--tag-family") tag.family = normalize_tag_family(need("--tag-family"));
             else if (a == "--target-id") tag.target_id = std::stoi(need("--target-id"));
             else if (a == "--require-target-id") tag.require_target_id = parse_bool(need("--require-target-id"));
             else if (a == "--lock-frames") tag.lock_frames = std::stoi(need("--lock-frames"));
