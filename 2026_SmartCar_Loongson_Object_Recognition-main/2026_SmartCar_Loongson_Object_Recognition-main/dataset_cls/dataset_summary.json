@@ -1,0 +1,278 @@
+{
+  "source_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\img_dataset",
+  "output_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\dataset_cls",
+  "seed": 42,
+  "splits": {
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1
+  },
+  "char_aug": {
+    "target_count_per_char_class": 24,
+    "blur_kernel_choices": [
+      7,
+      9,
+      11
+    ],
+    "max_workers": 8
+  },
+  "classes": {
+    "A_gun": {
+      "source_name": "A-枪支",
+      "total": 195,
+      "train": 156,
+      "val": 20,
+      "test": 19
+    },
+    "B_explosive": {
+      "source_name": "B-爆炸物",
+      "total": 157,
+      "train": 126,
+      "val": 16,
+      "test": 15
+    },
+    "C_dagger": {
+      "source_name": "C-匕首",
+      "total": 156,
+      "train": 125,
+      "val": 16,
+      "test": 15
+    },
+    "D_baton": {
+      "source_name": "D-警棍",
+      "total": 118,
+      "train": 94,
+      "val": 12,
+      "test": 12
+    },
+    "E_fire_axe": {
+      "source_name": "E-消防斧",
+      "total": 128,
+      "train": 102,
+      "val": 13,
+      "test": 13
+    },
+    "F_first_aid_kit": {
+      "source_name": "F-急救包",
+      "total": 157,
+      "train": 126,
+      "val": 16,
+      "test": 15
+    },
+    "G_flashlight": {
+      "source_name": "G-手电筒",
+      "total": 162,
+      "train": 130,
+      "val": 16,
+      "test": 16
+    },
+    "H_walkie_talkie": {
+      "source_name": "H-对讲机",
+      "total": 159,
+      "train": 127,
+      "val": 16,
+      "test": 16
+    },
+    "I_body_armor": {
+      "source_name": "I-防弹背心",
+      "total": 156,
+      "train": 125,
+      "val": 16,
+      "test": 15
+    },
+    "J_binoculars": {
+      "source_name": "J-望远镜",
+      "total": 171,
+      "train": 137,
+      "val": 17,
+      "test": 17
+    },
+    "K_helmet": {
+      "source_name": "K-头盔",
+      "total": 182,
+      "train": 146,
+      "val": 18,
+      "test": 18
+    },
+    "L_fire_truck": {
+      "source_name": "L-消防车",
+      "total": 167,
+      "train": 134,
+      "val": 17,
+      "test": 16
+    },
+    "M_ambulance": {
+      "source_name": "M-救护车",
+      "total": 150,
+      "train": 120,
+      "val": 15,
+      "test": 15
+    },
+    "N_armored_vehicle": {
+      "source_name": "N-装甲车",
+      "total": 130,
+      "train": 104,
+      "val": 13,
+      "test": 13
+    },
+    "O_motorcycle": {
+      "source_name": "O-摩托车",
+      "total": 152,
+      "train": 122,
+      "val": 15,
+      "test": 15
+    },
+    "char_B": {
+      "source_name": "字母和数字标识/B.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_D": {
+      "source_name": "字母和数字标识/D.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_E": {
+      "source_name": "字母和数字标识/E.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_A": {
+      "source_name": "字母和数字标识/A.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_1": {
+      "source_name": "字母和数字标识/1.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_3": {
+      "source_name": "字母和数字标识/3.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_C": {
+      "source_name": "字母和数字标识/C.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_2": {
+      "source_name": "字母和数字标识/2.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_F": {
+      "source_name": "字母和数字标识/F.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_J": {
+      "source_name": "字母和数字标识/J.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_G": {
+      "source_name": "字母和数字标识/G.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_M": {
+      "source_name": "字母和数字标识/M.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_H": {
+      "source_name": "字母和数字标识/H.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_I": {
+      "source_name": "字母和数字标识/I.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_L": {
+      "source_name": "字母和数字标识/L.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_K": {
+      "source_name": "字母和数字标识/K.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_O": {
+      "source_name": "字母和数字标识/O.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    },
+    "char_N": {
+      "source_name": "字母和数字标识/N.jpg",
+      "total": 24,
+      "train": 19,
+      "val": 2,
+      "test": 3
+    }
+  },
+  "totals": {
+    "train": 2216,
+    "val": 272,
+    "test": 284,
+    "all": 2772
+  },
+  "warnings": [
+    "char_B: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_D: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_E: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_A: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_1: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_3: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_C: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_2: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_F: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_J: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_G: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_M: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_H: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_I: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_L: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_K: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_O: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_N: val/test are synthetic variants from one source image only; they measure transform robustness, not true real-world generalization."
+  ]
+}

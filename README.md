@@ -1,143 +1,105 @@
-# vision_app (5-module build)
+# vision_app stable v5
 
-This build stays limited to these code modules:
+Five code modules only:
+- `camera.hpp`
+- `calibrate.hpp`
+- `stats.hpp`
+- `deploy.hpp`
+- `main.c`
 
-- `camera`
-- `calibrate`
-- `stats`
-- `deploy`
-- `main`
+## Purpose
+- probe USB camera modes
+- benchmark one camera mode
+- live AprilTag calibration
+- build a stable full-image auto-fit warp
+- soft-limit the warp canvas so Pi does not crash on large previews
+- save precomputed remap maps + valid mask + ROI config
+- deploy later using the saved precomputation
 
-## What changed in this version
+## Key stabilization changes
+- **single preview window** in live/deploy
+- **keyboard-only ROI editing**
+- **auto-fit full transformed source image** into the warp canvas
+- **soft max on warp size**; large auto-fit canvases are scaled down
+- **preview downscale** independent from processing warp size
+- **valid mask** stored and displayed; empty/invalid regions remain visible but are ignored by later processing
+- **remap cache** saved for fast later feeds
 
-This version is prepared for the flow:
-
-```text
-probe camera
--> bench one camera mode
--> live AprilTag detect
--> manual/auto lock
--> compute final full-view warped preview transform
--> edit red_roi and image_roi with keyboard only
--> save H + remap cache + rois
--> deploy mode runs:
-   red_roi gate -> image_roi extraction -> infer stub / later model hook
-```
-
-### Important behavior
-
-- Live/deploy now **block oversized interactive camera modes by default**.
-- The saved homography is the **final full-view warped preview transform**.
-- ROIs are stored as **ratios of that final warped preview canvas**.
-- Deploy uses the same saved canvas, so ROI positions stay aligned.
-- Precomputed remap cache can be saved and loaded for faster runtime warp.
-
-## Build
-
-```bash
-mkdir -p build
-cd build
-cmake ..
-make -j$(nproc)
-```
-
-## Recommended workflow
-
-### 1. Probe camera modes
+## Modes
+### probe
+List camera formats/resolutions/FPS from `v4l2-ctl`.
 
 ```bash
 ./vision_app --mode probe
 ```
 
-### 2. Benchmark one safe camera mode
+### bench
+Open one camera config and measure actual FPS.
 
 ```bash
-./vision_app --mode bench \
-  --width 1280 --height 720 --fps 30 \
-  --fourcc MJPG \
-  --latest-only 1 --drain-grabs 2 \
-  --headless 1 --duration 10
+./vision_app --mode bench --device /dev/video0 --width 1280 --height 720 --fps 30 --fourcc MJPG --duration 10
 ```
 
-### 3. Live calibration
+### live
+Calibration flow:
+1. open camera with your chosen config
+2. detect AprilTag family `auto|16|25|36`
+3. while unlocked, if a candidate exists, show temporary full-image auto-fit warp preview
+4. press `space` to lock or allow auto-lock if enabled
+5. edit `red_roi` and `image_roi` with keyboard
+6. save homography/remap/mask/rois
+
+Recommended start:
 
 ```bash
 ./vision_app --mode live \
+  --device /dev/video0 \
   --width 1280 --height 720 --fps 30 \
   --fourcc MJPG \
   --tag-family auto \
   --target-id 0 \
+  --require-target-id 1 \
   --manual-lock-only 1 \
-  --warp-width 720 --warp-height 720 \
-  --warp-view-max-side 900
+  --warp-soft-max 900 \
+  --preview-soft-max 600
 ```
 
-Then:
-
-- show the tag
-- press `space` to lock
-- press `1` to edit `red_roi`
-- press `2` to edit `image_roi`
-- use `wasd` to move
-- use `ijkl` to resize
-- `[` `]` change move step
-- `,` `.` change size step
-- press `p` to save all
-
-### 4. Deploy using saved calibration
+### deploy
+Load saved remap + ROI config and run directly.
 
 ```bash
 ./vision_app --mode deploy \
-  --load-h ../report/warp_h.json \
-  --load-rois ../report/rois.json \
-  --load-remap ../report/warp_remap.yml.gz \
-  --use-remap-cache 1 \
-  --red-mean-threshold 120 \
-  --red-dominance-threshold 20
+  --device /dev/video0 \
+  --width 1280 --height 720 --fps 30 \
+  --fourcc MJPG \
+  --load-warp ../report/warp_package.yml.gz \
+  --load-rois ../report/rois.yml
 ```
 
-## Deploy gate logic
-
-Deploy does:
-
-```text
-warp frame
--> crop red_roi
--> if mean(red) and red dominance exceed thresholds:
-      crop image_roi
-      pass image_roi to infer stub
-      optionally save image_roi snapshot
-```
-
-The current infer step is a lightweight placeholder that reports:
-
-- mean gray
-- stddev gray
-- edge ratio
-
-That gives you an end-to-end place to later replace with your real model call.
-
-## Interactive size safety
-
-Live/deploy reject large requested camera sizes by default.
-
-Default guard:
-
-```text
-interactive_max_side = 1000
-```
-
-Override only if you deliberately want to risk instability:
-
-```bash
---unsafe-big-frame 1
-```
+## Live controls
+- `space` / `enter`: lock current candidate
+- `u`: unlock and reacquire
+- `1`: select `red_roi`
+- `2`: select `image_roi`
+- `w a s d`: move selected ROI
+- `j l`: shrink/grow width
+- `i k`: shrink/grow height
+- `[` `]`: move step down/up
+- `,` `.`: size step down/up
+- `r`: reset selected ROI
+- `p`: save all
+- `o`: save ROIs only
+- `y`: save warp package only
+- `h`: toggle help overlay
+- `q` / `ESC`: quit
 
 ## Saved files
+Default under `../report/` when run from `build/`:
+- `warp_package.yml.gz` : homography + remap maps + valid mask + sizes
+- `rois.yml` : ratio ROIs
+- `test_results.csv`
+- `latest_report.md`
 
-- `../report/warp_h.json`
-- `../report/rois.json`
-- `../report/warp_remap.yml.gz`
-- `../report/latest_report.md`
-- `../report/test_results.csv`
-- `../report/trigger_image_roi_XXXXXX.png`
+## Notes
+- AprilTag detection uses OpenCV ArUco AprilTag dictionaries if available.
+- If your OpenCV build does not include `aruco`, probe/bench still work, but live calibration and deploy warp loading from tag detection will be unavailable.

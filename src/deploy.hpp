@@ -1,15 +1,10 @@
 #pragma once
 
 #include <chrono>
-#include <filesystem>
 #include <iostream>
-#include <iomanip>
-#include <sstream>
 #include <string>
-#include <vector>
 
 #include <opencv2/highgui.hpp>
-#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include "camera.hpp"
@@ -18,469 +13,256 @@
 
 namespace vision_app {
 
-struct DeployConfig {
-    std::string mode = "live"; // probe | bench | live | deploy
-
-    std::string save_probe_csv = "../report/probe_table.csv";
-    std::string save_test_csv = "../report/test_results.csv";
-    std::string save_report_md = "../report/latest_report.md";
-    std::string save_h_path = "../report/warp_h.json";
-    std::string save_rois_path = "../report/rois.json";
-    std::string save_remap_path = "../report/warp_remap.yml.gz";
-    std::string load_h_path = "";
-    std::string load_rois_path = "";
-    std::string load_remap_path = "";
-
-    bool auto_save_lock = true;
-    bool auto_load_h = false;
-    bool auto_load_rois = false;
-    bool auto_load_remap = false;
-
-    int warp_width = 720;      // tag rect target width before full-view bbox translation
-    int warp_height = 720;     // tag rect target height before full-view bbox translation
-    int warp_view_max_side = 900;
-
-    bool live_preview_raw = true;
-    bool live_preview_warp = true;
-    bool show_help_overlay = true;
-    bool show_status_overlay = true;
-    bool save_snapshots = false;
-    std::string snapshot_dir = "../report";
-
-    bool use_remap_cache = true;
-    bool fixed_point_remap = true;
-    bool save_remap_cache = true;
-
-    int interactive_max_side = 1000;
-    bool unsafe_big_frame = false;
-
-    double move_step = 0.005;
-    double size_step = 0.005;
-
-    double red_mean_threshold = 120.0;
-    double red_dominance_threshold = 20.0;
-    int trigger_cooldown_frames = 10;
-    bool save_triggered_image_roi = true;
+struct AppOptions {
+    std::string mode = "live";
+    CameraOptions cam{};
+    AprilTagConfig tag{};
+    int duration = 10;
+    int warp_soft_max = 900;
+    int preview_soft_max = 600;
+    std::string save_warp = "../report/warp_package.yml.gz";
+    std::string save_rois = "../report/rois.yml";
+    std::string load_warp = "../report/warp_package.yml.gz";
+    std::string load_rois = "../report/rois.yml";
+    std::string csv_path = "../report/test_results.csv";
+    std::string md_path = "../report/latest_report.md";
+    bool show_help = true;
 };
 
-static RoiRatio default_red_roi() { return RoiRatio{0.05, 0.10, 0.20, 0.20}; }
-static RoiRatio default_image_roi() { return RoiRatio{0.30, 0.10, 0.50, 0.60}; }
-
-static void nudge_ratio(RoiRatio& roi, int key, double move_step, double size_step) {
-    if (key == 'a') roi.x -= move_step;
-    if (key == 'd') roi.x += move_step;
-    if (key == 'w') roi.y -= move_step;
-    if (key == 's') roi.y += move_step;
-    if (key == 'j') roi.w -= size_step;
-    if (key == 'l') roi.w += size_step;
-    if (key == 'i') roi.h -= size_step;
-    if (key == 'k') roi.h += size_step;
-    clamp_and_validate_roi(roi);
+static inline cv::Mat downscale_for_preview(const cv::Mat& img, int soft_max) {
+    if (img.empty()) return img;
+    if (soft_max <= 0) return img;
+    int w = img.cols, h = img.rows;
+    int m = std::max(w, h);
+    if (m <= soft_max) return img;
+    double scale = static_cast<double>(soft_max) / static_cast<double>(m);
+    cv::Mat out;
+    cv::resize(img, out, cv::Size(std::max(1, int(std::round(w * scale))), std::max(1, int(std::round(h * scale)))), 0, 0, cv::INTER_AREA);
+    return out;
 }
 
-static void print_live_keys() {
-    std::cout
-        << "\nLive/deploy keys:\n"
-        << "  q / ESC      quit\n"
-        << "  h            toggle help overlay\n"
-        << "  space/enter  lock current visible tag\n"
-        << "  u            unlock and reacquire\n"
-        << "  p            save all outputs\n"
-        << "  y            save homography only\n"
-        << "  o            save rois only\n"
-        << "  g            save remap cache only\n"
-        << "  1 / 2        select red_roi / image_roi\n"
-        << "  wasd         move selected roi\n"
-        << "  ijkl         resize selected roi\n"
-        << "  [ / ]        adjust move step\n"
-        << "  , / .        adjust size step\n"
-        << "  r            reset selected roi to defaults\n"
-        << "  c            save warped snapshot\n"
-        << std::endl;
+static inline void draw_help_overlay(cv::Mat& img, int selected_roi, double move_step, double size_step) {
+    int y = 24;
+    auto put = [&](const std::string& s) {
+        cv::putText(img, s, {16, y}, cv::FONT_HERSHEY_SIMPLEX, 0.52, cv::Scalar(255,255,255), 1);
+        y += 20;
+    };
+    put("space lock | u unlock | 1 red_roi | 2 image_roi | p save all");
+    put("wasd move | j/l width -/+ | i/k height -/+ | [ ] move step | , . size step");
+    put("r reset selected | y save warp | o save rois | h help | q quit");
+    put(std::string("selected=") + (selected_roi == 1 ? "red_roi" : "image_roi") +
+        " move_step=" + cv::format("%.4f", move_step) +
+        " size_step=" + cv::format("%.4f", size_step));
 }
 
-static std::string live_phase_string(bool lock_valid, const TagLocker& locker, bool manual_lock_only) {
-    if (lock_valid) return "LOCKED";
-    if (manual_lock_only) return "SEARCHING (manual lock)";
-    if (locker.history_size() > 0) return "LOCKING";
-    return "SEARCHING";
-}
-
-static void draw_live_hud(cv::Mat& raw_view,
-                          cv::Mat* warped_view,
-                          const AprilTagConfig& tag_cfg,
-                          const TagLocker& locker,
-                          const AprilTagDetection& det,
-                          const HomographyLock& lock,
-                          char selected_roi,
-                          bool show_help_overlay,
-                          bool auto_save_lock,
-                          bool use_remap_cache,
-                          double move_step,
-                          double size_step,
-                          const RedGateResult* gate,
-                          const InferStubResult* infer,
-                          const DeployConfig& dep_cfg) {
-    const std::string phase = live_phase_string(lock.valid, locker, tag_cfg.manual_lock_only);
-    std::ostringstream line1;
-    line1 << "phase=" << phase << "  family_req=" << normalize_family_token(tag_cfg.family)
-          << "  target_id=" << (tag_cfg.require_target_id ? std::to_string(tag_cfg.target_id) : std::string("any"));
-    cv::putText(raw_view, line1.str(), {20, 60}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
-
-    std::ostringstream line2;
-    line2 << "selected_roi=" << (selected_roi == '1' ? "red_roi" : "image_roi")
-          << "  move_step=" << std::fixed << std::setprecision(4) << move_step
-          << "  size_step=" << size_step
-          << "  auto_save=" << (auto_save_lock ? "on" : "off");
-    cv::putText(raw_view, line2.str(), {20, 84}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
-
-    if (det.found && !lock.valid) {
-        std::ostringstream line3;
-        line3 << "candidate=" << det.family << " id=" << det.id << "  hist=" << locker.history_size() << '/' << tag_cfg.lock_frames;
-        cv::putText(raw_view, line3.str(), {20, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {0,255,255}, 2);
-    }
-
-    if (show_help_overlay) {
-        const std::vector<std::string> lines = {
-            "space lock  u unlock  p save all  y save H  o save rois  g save remap",
-            "1/2 select roi  wasd move  ijkl resize  [ ] move step  , . size step",
-            std::string("warp=") + (use_remap_cache ? "remap cache" : "warpPerspective") +
-                std::string("  max_view_side=") + std::to_string(dep_cfg.warp_view_max_side),
-            std::string("red gate: mean_r>=") + std::to_string(static_cast<int>(dep_cfg.red_mean_threshold)) +
-                " and red_score>=" + std::to_string(static_cast<int>(dep_cfg.red_dominance_threshold))
-        };
-        int y = raw_view.rows - 60;
-        for (const auto& line : lines) {
-            cv::putText(raw_view, line, {20, y}, cv::FONT_HERSHEY_SIMPLEX, 0.48, {220,220,220}, 1);
-            y += 18;
-        }
-    }
-
-    if (warped_view && !warped_view->empty()) {
-        std::ostringstream w1;
-        w1 << (selected_roi == '1' ? "red_roi" : "image_roi") << "  move="
-           << std::fixed << std::setprecision(4) << move_step << " size=" << size_step;
-        cv::putText(*warped_view, w1.str(), {20, warped_view->rows - 22}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
-        if (gate && gate->valid) {
-            std::ostringstream gs;
-            gs << "gate=" << (gate->triggered ? "TRIGGER" : "idle")
-               << "  mean_r=" << std::fixed << std::setprecision(1) << gate->mean_r
-               << "  red_score=" << gate->red_score;
-            cv::putText(*warped_view, gs.str(), {20, warped_view->rows - 46}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                        gate->triggered ? cv::Scalar(0,255,255) : cv::Scalar(200,200,200), 1);
-        }
-        if (infer && infer->valid) {
-            cv::putText(*warped_view, infer->summary, {20, warped_view->rows - 68}, cv::FONT_HERSHEY_SIMPLEX, 0.46, {230,230,230}, 1);
-        }
-    }
-}
-
-static bool save_all_outputs(const DeployConfig& dep_cfg,
-                             const CameraConfig& cam_cfg,
-                             const CaptureStats& capture,
-                             const StageStats& stage,
-                             const HomographyLock* lock,
-                             const RoiSet& rois,
-                             const WarpRemapCache* remap_cache) {
-    bool ok = true;
-    if (lock && lock->valid) ok = save_homography_json(dep_cfg.save_h_path, *lock) && ok;
-    if (dep_cfg.save_remap_cache && remap_cache && remap_cache->valid) ok = save_warp_remap_cache(dep_cfg.save_remap_path, *remap_cache) && ok;
-    ok = save_rois_json(dep_cfg.save_rois_path, rois) && ok;
-    ok = write_latest_report_md(dep_cfg.save_report_md, cam_cfg, capture, &stage, (lock && lock->valid) ? lock : nullptr, &rois) && ok;
-    return ok;
-}
-
-static bool ensure_remap_cache_ready(const DeployConfig& dep_cfg,
-                                     const cv::Size& source_size,
-                                     const HomographyLock& lock,
-                                     WarpRemapCache& cache,
-                                     std::string& err) {
-    if (!dep_cfg.use_remap_cache || !lock.valid) return true;
-    if (remap_cache_matches(cache, source_size, lock.warp_size)) return true;
-
-    if ((dep_cfg.mode == "deploy" || dep_cfg.auto_load_remap || !dep_cfg.load_remap_path.empty()) && !cache.valid) {
-        const std::string path = dep_cfg.load_remap_path.empty() ? dep_cfg.save_remap_path : dep_cfg.load_remap_path;
-        WarpRemapCache loaded;
-        if (load_warp_remap_cache(path, loaded) && remap_cache_matches(loaded, source_size, lock.warp_size)) {
-            cache = loaded;
-            return true;
-        }
-    }
-
-    if (!build_warp_remap_cache(lock, source_size, cache, dep_cfg.fixed_point_remap)) {
-        err = "failed to build warp remap cache";
-        return false;
-    }
-    if (dep_cfg.save_remap_cache) save_warp_remap_cache(dep_cfg.save_remap_path, cache);
-    return true;
-}
-
-static bool validate_interactive_camera_size(const CameraConfig& cam_cfg,
-                                             const DeployConfig& dep_cfg,
-                                             std::string& err) {
-    if (cam_cfg.headless) return true;
-    if (dep_cfg.unsafe_big_frame) return true;
-    const int long_side = std::max(cam_cfg.width, cam_cfg.height);
-    if (long_side > dep_cfg.interactive_max_side) {
-        std::ostringstream oss;
-        oss << "interactive mode blocked because requested camera size " << cam_cfg.width << "x" << cam_cfg.height
-            << " exceeds safe max side " << dep_cfg.interactive_max_side
-            << ". Use bench for larger modes or pass --unsafe-big-frame 1.";
-        err = oss.str();
-        return false;
-    }
-    return true;
-}
-
-static bool run_bench_mode(const CameraConfig& cam_cfg,
-                           const DeployConfig& dep_cfg,
-                           CaptureStats& out_capture,
-                           std::string& err) {
-    LatestFrameCamera cam;
-    if (!cam.open(cam_cfg, err)) return false;
-
+static inline bool run_bench(const AppOptions& opt, std::string& err) {
+    CameraCapture cam;
+    if (!cam.open(opt.cam, err)) return false;
     cv::Mat frame;
-    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 5; ++i) cam.read_latest(frame);
+
+    BenchStats st{};
+    using clk = std::chrono::steady_clock;
+    auto t0 = clk::now();
+    auto prev = t0;
+    double dt_sum = 0.0, dt_min = 1e18, dt_max = 0.0;
+
     while (true) {
-        if (!cam.read_latest(frame, err)) return false;
-        if (!cam_cfg.headless && cam_cfg.preview) {
-            cv::imshow("vision_app_bench", frame);
-            const int key = cv::waitKey(1) & 0xFF;
+        if (!cam.read_latest(frame)) { err = "camera read failed"; return false; }
+        auto now = clk::now();
+        double dt_ms = std::chrono::duration<double, std::milli>(now - prev).count();
+        prev = now;
+        if (st.frames > 0) {
+            dt_sum += dt_ms;
+            dt_min = std::min(dt_min, dt_ms);
+            dt_max = std::max(dt_max, dt_ms);
+        }
+        st.frames++;
+        st.actual_w = frame.cols; st.actual_h = frame.rows;
+        if (!opt.cam.headless) {
+            cv::Mat disp = downscale_for_preview(frame, opt.preview_soft_max);
+            cv::imshow("vision_app", disp);
+            int key = cv::waitKey(1) & 0xFF;
             if (key == 'q' || key == 27) break;
         }
-        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (elapsed >= cam_cfg.duration_sec) break;
+        double elapsed = std::chrono::duration<double>(now - t0).count();
+        if (elapsed >= opt.duration) break;
     }
-    out_capture = cam.stats();
-    cam.close();
-    if (!cam_cfg.headless && cam_cfg.preview) cv::destroyWindow("vision_app_bench");
-
-    print_capture_stats(cam_cfg, out_capture);
-    append_test_csv(dep_cfg.save_test_csv, cam_cfg, out_capture);
-    write_latest_report_md(dep_cfg.save_report_md, cam_cfg, out_capture, nullptr, nullptr, nullptr);
+    st.elapsed_sec = std::chrono::duration<double>(clk::now() - t0).count();
+    if (st.elapsed_sec > 0.0) st.fps_avg = static_cast<double>(st.frames) / st.elapsed_sec;
+    if (st.frames > 1) {
+        st.frame_ms_avg = dt_sum / static_cast<double>(st.frames - 1);
+        st.frame_ms_min = dt_min;
+        st.frame_ms_max = dt_max;
+        if (dt_max > 0.0) st.fps_min = 1000.0 / dt_max;
+        if (dt_min > 0.0) st.fps_max = 1000.0 / dt_min;
+    }
+    print_bench_stats(st);
+    append_bench_csv(opt.csv_path, opt.cam.device, opt.cam.width, opt.cam.height, opt.cam.fps, opt.cam.fourcc, st);
+    write_latest_report_md(opt.md_path, "bench",
+        "- Device: " + opt.cam.device + "\n" +
+        "- Requested: " + std::to_string(opt.cam.width) + "x" + std::to_string(opt.cam.height) + " @ " + std::to_string(opt.cam.fps) + " " + opt.cam.fourcc + "\n" +
+        "- Actual FPS: " + cv::format("%.3f", st.fps_avg) + "\n");
     return true;
 }
 
-static std::string make_trigger_path(const DeployConfig& dep_cfg, uint64_t trigger_index) {
-    std::ostringstream oss;
-    oss << dep_cfg.snapshot_dir << "/trigger_image_roi_" << std::setw(6) << std::setfill('0') << trigger_index << ".png";
-    return oss.str();
-}
+static inline bool run_live(const AppOptions& opt, std::string& err) {
+#if !VISION_APP_HAS_ARUCO
+    err = "OpenCV ArUco/AprilTag support not available in this build";
+    return false;
+#else
+    CameraCapture cam;
+    if (!cam.open(opt.cam, err)) return false;
+    RoiConfig rois;
+    load_rois_yaml(opt.save_rois, rois);
+    WarpPackage locked_pack;
+    TagLocker locker(opt.tag.lock_frames);
+    AprilTagDetection det, locked_det;
+    cv::Mat frame, warped, valid, display;
+    bool locked = false;
+    int selected = 1;
+    double move_step = 0.005;
+    double size_step = 0.005;
+    bool show_help = opt.show_help;
+    cv::namedWindow("vision_app", cv::WINDOW_AUTOSIZE);
 
-static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
-                                    const AprilTagConfig& tag_cfg,
-                                    const DeployConfig& dep_cfg,
-                                    RoiSet& rois,
-                                    CaptureStats& out_capture,
-                                    StageStats& out_stage,
-                                    HomographyLock& out_lock,
-                                    std::string& err) {
-    if (!validate_interactive_camera_size(cam_cfg, dep_cfg, err)) return false;
-
-    LatestFrameCamera cam;
-    if (!cam.open(cam_cfg, err)) return false;
-
-    if (dep_cfg.auto_load_rois || !dep_cfg.load_rois_path.empty()) {
-        const std::string path = dep_cfg.load_rois_path.empty() ? dep_cfg.save_rois_path : dep_cfg.load_rois_path;
-        load_rois_json(path, rois);
-    }
-
-    HomographyLock lock;
-    if (dep_cfg.mode == "deploy" || dep_cfg.auto_load_h || !dep_cfg.load_h_path.empty()) {
-        const std::string path = dep_cfg.load_h_path.empty() ? dep_cfg.save_h_path : dep_cfg.load_h_path;
-        if (!load_homography_json(path, lock)) {
-            if (dep_cfg.mode == "deploy") {
-                err = "deploy mode requires a valid saved homography file";
-                return false;
-            }
-        }
-    }
-
-    TagLocker locker(tag_cfg);
-    RollingTimer detect_t, warp_t, infer_t, total_t;
-    cv::Mat frame, raw_view, warped;
-    WarpRemapCache remap_cache;
-    char selected_roi = '1';
-    bool show_help_overlay = dep_cfg.show_help_overlay;
-    bool auto_save_lock = dep_cfg.auto_save_lock;
-    double move_step = dep_cfg.move_step;
-    double size_step = dep_cfg.size_step;
-    int cooldown = 0;
-    uint64_t trigger_count = 0;
-    RedGateResult last_gate{};
-    InferStubResult last_infer{};
-    print_live_keys();
-
-    if (!cam_cfg.headless) {
-        if (dep_cfg.live_preview_raw) cv::namedWindow("vision_app_raw", cv::WINDOW_AUTOSIZE);
-        if (dep_cfg.live_preview_warp) cv::namedWindow("vision_app_warp", cv::WINDOW_AUTOSIZE);
-    }
-
-    const auto t0 = std::chrono::steady_clock::now();
     while (true) {
-        const auto loop_start = std::chrono::steady_clock::now();
-        if (!cam.read_latest(frame, err)) return false;
-        if (lock.valid && lock.source_size.width > 0 && lock.source_size.height > 0 && frame.size() != lock.source_size) {
-            std::ostringstream oss;
-            oss << "saved calibration expects source size " << lock.source_size.width << "x" << lock.source_size.height
-                << " but current camera delivers " << frame.cols << "x" << frame.rows;
-            err = oss.str();
-            return false;
+        if (!cam.read_latest(frame)) { err = "camera read failed"; return false; }
+        AprilTagDetection cur{};
+        detect_apriltag_best(frame, opt.tag, cur, err);
+        if (!locked) {
+            if (cur.found && !opt.tag.manual_lock_only && locker.update(cur)) {
+                if (!build_warp_package_from_detection(cur, frame.size(), opt.warp_soft_max, locked_pack, err)) return false;
+                locked = true; locked_det = cur;
+            }
         }
 
-        raw_view = frame.clone();
-        AprilTagDetection det;
-
-        if (!lock.valid) {
-            const auto td0 = std::chrono::steady_clock::now();
-            if (!detect_apriltag_best(frame, tag_cfg, det, err)) return false;
-            detect_t.push(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - td0).count());
-
-            const bool allow_auto_lock = !tag_cfg.manual_lock_only;
-            const bool got_lock = det.found && locker.update(det, frame.size(), allow_auto_lock);
-            draw_detection_overlay(raw_view, det, got_lock);
-            if (got_lock) {
-                if (!compute_full_view_homography_from_tag_quad(locker.locked_det(), frame.size(), cv::Size(dep_cfg.warp_width, dep_cfg.warp_height), dep_cfg.warp_view_max_side, lock)) {
-                    err = "failed to compute full-view homography after tag lock";
-                    return false;
+        if (!locked) {
+            cv::Mat raw = frame.clone();
+            draw_detection(raw, cur, false);
+            if (cur.found) {
+                WarpPackage temp_pack;
+                if (build_warp_package_from_detection(cur, frame.size(), opt.warp_soft_max, temp_pack, err)) {
+                    apply_warp(frame, temp_pack, warped, valid);
+                    cv::Mat warp_preview = compose_preview_with_mask(warped, valid);
+                    draw_rois(warp_preview, rois, selected);
+                    cv::Mat left = downscale_for_preview(raw, opt.preview_soft_max);
+                    cv::Mat right = downscale_for_preview(warp_preview, opt.preview_soft_max);
+                    int H = std::max(left.rows, right.rows);
+                    int W = left.cols + right.cols;
+                    display = cv::Mat(H, W, CV_8UC3, cv::Scalar(30,30,30));
+                    left.copyTo(display(cv::Rect(0,0,left.cols,left.rows)));
+                    right.copyTo(display(cv::Rect(left.cols,0,right.cols,right.rows)));
+                } else {
+                    display = downscale_for_preview(raw, opt.preview_soft_max);
                 }
-                if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
-                if (auto_save_lock) {
-                    save_homography_json(dep_cfg.save_h_path, lock);
-                    save_rois_json(dep_cfg.save_rois_path, rois);
-                    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
-                }
+            } else {
+                display = downscale_for_preview(raw, opt.preview_soft_max);
             }
+            if (show_help) draw_help_overlay(display, selected, move_step, size_step);
+            cv::imshow("vision_app", display);
         } else {
-            cv::putText(raw_view, "Locked deploy/runtime mode", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0,255,0}, 2);
+            if (!apply_warp(frame, locked_pack, warped, valid)) { err = "apply_warp failed"; return false; }
+            cv::Mat warp_preview = compose_preview_with_mask(warped, valid);
+            draw_rois(warp_preview, rois, selected);
+            cv::putText(warp_preview, "LOCKED family=" + locked_pack.family + " id=" + std::to_string(locked_pack.id),
+                        {16, 24}, cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0,255,0), 2);
+            display = downscale_for_preview(warp_preview, opt.preview_soft_max);
+            if (show_help) draw_help_overlay(display, selected, move_step, size_step);
+            cv::imshow("vision_app", display);
         }
 
-        if (lock.valid) {
-            if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
-            const auto tw0 = std::chrono::steady_clock::now();
-            const bool warped_ok = dep_cfg.use_remap_cache ? warp_full_frame_cached(frame, warped, remap_cache) : warp_full_frame(frame, warped, lock);
-            if (!warped_ok) {
-                err = dep_cfg.use_remap_cache ? "remap warp failed" : "warpPerspective failed";
-                return false;
-            }
-            warp_t.push(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw0).count());
-
-            last_gate = evaluate_red_gate(crop_roi_clone(warped, rois.red_roi), dep_cfg.red_mean_threshold, dep_cfg.red_dominance_threshold);
-            if (cooldown > 0) --cooldown;
-            if (last_gate.valid && last_gate.triggered && cooldown <= 0) {
-                const auto ti0 = std::chrono::steady_clock::now();
-                const cv::Mat image_roi = crop_roi_clone(warped, rois.image_roi);
-                last_infer = run_infer_stub(image_roi);
-                infer_t.push(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ti0).count());
-                ++trigger_count;
-                cooldown = std::max(0, dep_cfg.trigger_cooldown_frames);
-                if (dep_cfg.save_triggered_image_roi && !image_roi.empty()) {
-                    std::filesystem::create_directories(dep_cfg.snapshot_dir);
-                    cv::imwrite(make_trigger_path(dep_cfg, trigger_count), image_roi);
-                }
-            }
-
-            draw_roi_overlay(warped, rois, lock, selected_roi, &last_gate, &last_infer);
-            draw_live_hud(raw_view, &warped, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, dep_cfg.use_remap_cache, move_step, size_step, &last_gate, &last_infer, dep_cfg);
-        } else {
-            draw_live_hud(raw_view, nullptr, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, dep_cfg.use_remap_cache, move_step, size_step, nullptr, nullptr, dep_cfg);
-        }
-
-        if (!cam_cfg.headless && dep_cfg.live_preview_raw) cv::imshow("vision_app_raw", raw_view);
-        if (!cam_cfg.headless && dep_cfg.live_preview_warp && !warped.empty()) cv::imshow("vision_app_warp", warped);
-
-        total_t.push(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loop_start).count());
-
-        const int key = (cam_cfg.headless ? -1 : (cv::waitKey(1) & 0xFF));
-        if (key == 'q' || key == 27) break;
-        if (key == '1') selected_roi = '1';
-        if (key == '2') selected_roi = '2';
-        if (key == 'h') show_help_overlay = !show_help_overlay;
-        if (key == 'u') { lock = {}; locker.reset(); warped.release(); remap_cache = {}; last_gate = {}; last_infer = {}; }
+        int key = cv::waitKey(1) & 0xFF;
+        if (key == 27 || key == 'q') break;
+        if (key == 'h') show_help = !show_help;
+        if (key == '1') selected = 1;
+        if (key == '2') selected = 2;
+        if (key == '[') move_step = std::max(0.001, move_step * 0.5);
+        if (key == ']') move_step = std::min(0.05, move_step * 2.0);
+        if (key == ',') size_step = std::max(0.001, size_step * 0.5);
+        if (key == '.') size_step = std::min(0.10, size_step * 2.0);
         if (key == 'r') {
-            if (selected_roi == '1') rois.red_roi = default_red_roi();
-            else rois.image_roi = default_image_roi();
+            if (selected == 1) rois.red_roi = RoiRatio{0.10,0.10,0.20,0.20};
+            else rois.image_roi = RoiRatio{0.35,0.15,0.45,0.45};
+        }
+        if (key == 'u') { locked = false; locker.reset(); locked_pack = {}; }
+        if (key == ' ' || key == 13) {
+            if (cur.found) {
+                if (!build_warp_package_from_detection(cur, frame.size(), opt.warp_soft_max, locked_pack, err)) return false;
+                locked = true; locked_det = cur;
+            }
         }
         if (key == 'p') {
-            StageStats stage_preview{};
-            stage_preview.frames = cam.stats().frames;
-            stage_preview.detect_ms_avg = detect_t.avg();
-            stage_preview.warp_ms_avg = warp_t.avg();
-            stage_preview.infer_ms_avg = infer_t.avg();
-            stage_preview.total_ms_avg = total_t.avg();
-            stage_preview.detect_ms_max = detect_t.max_ms;
-            stage_preview.warp_ms_max = warp_t.max_ms;
-            stage_preview.infer_ms_max = infer_t.max_ms;
-            stage_preview.total_ms_max = total_t.max_ms;
-            stage_preview.detector_fps_avg = (stage_preview.detect_ms_avg > 0.0) ? (1000.0 / stage_preview.detect_ms_avg) : 0.0;
-            stage_preview.trigger_count = trigger_count;
-            stage_preview.last_red_mean = last_gate.mean_r;
-            stage_preview.last_red_score = last_gate.red_score;
-            save_all_outputs(dep_cfg, cam_cfg, cam.stats(), stage_preview, lock.valid ? &lock : nullptr, rois, remap_cache.valid ? &remap_cache : nullptr);
-            std::cout << "Saved all outputs\n";
+            if (locked_pack.valid && !save_warp_package(opt.save_warp, locked_pack)) std::cerr << "Warning: failed to save warp package\n";
+            if (!save_rois_yaml(opt.save_rois, rois)) std::cerr << "Warning: failed to save rois\n";
+            write_latest_report_md(opt.md_path, "live",
+                "- Locked family: " + locked_pack.family + "\n" +
+                "- Locked id: " + std::to_string(locked_pack.id) + "\n" +
+                "- Warp size: " + std::to_string(locked_pack.warp_w) + "x" + std::to_string(locked_pack.warp_h) + "\n" +
+                "- Save warp: `" + opt.save_warp + "`\n" +
+                "- Save rois: `" + opt.save_rois + "`\n");
         }
-        if (key == 'y' && lock.valid) { save_homography_json(dep_cfg.save_h_path, lock); std::cout << "Saved homography\n"; }
-        if (key == 'o') { save_rois_json(dep_cfg.save_rois_path, rois); std::cout << "Saved rois\n"; }
-        if (key == 'g' && remap_cache.valid) { save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache); std::cout << "Saved remap cache\n"; }
-        if ((key == ' ' || key == 13) && !lock.valid) {
-            const AprilTagDetection cand = locker.last_candidate().found ? locker.last_candidate() : det;
-            if (locker.force_lock(cand, frame.size())) {
-                if (!compute_full_view_homography_from_tag_quad(locker.locked_det(), frame.size(), cv::Size(dep_cfg.warp_width, dep_cfg.warp_height), dep_cfg.warp_view_max_side, lock)) {
-                    err = "failed to compute full-view homography after manual lock";
-                    return false;
-                }
-                if (!ensure_remap_cache_ready(dep_cfg, frame.size(), lock, remap_cache, err)) return false;
-                if (auto_save_lock) {
-                    save_homography_json(dep_cfg.save_h_path, lock);
-                    save_rois_json(dep_cfg.save_rois_path, rois);
-                    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
-                }
-            }
+        if (key == 'y' && locked_pack.valid) {
+            if (!save_warp_package(opt.save_warp, locked_pack)) std::cerr << "Warning: failed to save warp package\n";
         }
-        if (key == 'c' && dep_cfg.save_snapshots && !warped.empty()) {
-            std::filesystem::create_directories(dep_cfg.snapshot_dir);
-            const std::string path = dep_cfg.snapshot_dir + "/warped_snapshot.png";
-            cv::imwrite(path, warped);
-            std::cout << "Saved snapshot: " << path << "\n";
+        if (key == 'o') {
+            if (!save_rois_yaml(opt.save_rois, rois)) std::cerr << "Warning: failed to save rois\n";
         }
-        if (key == '[') move_step = std::max(0.001, move_step * 0.5);
-        if (key == ']') move_step = std::min(0.100, move_step * 2.0);
-        if (key == ',') size_step = std::max(0.001, size_step * 0.5);
-        if (key == '.') size_step = std::min(0.100, size_step * 2.0);
 
-        if (selected_roi == '1') nudge_ratio(rois.red_roi, key, move_step, size_step);
-        else if (selected_roi == '2') nudge_ratio(rois.image_roi, key, move_step, size_step);
-
-        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (cam_cfg.duration_sec > 0 && elapsed >= cam_cfg.duration_sec && cam_cfg.headless) break;
+        if (selected == 1) nudge_roi(rois.red_roi, static_cast<char>(key), move_step, size_step);
+        else nudge_roi(rois.image_roi, static_cast<char>(key), move_step, size_step);
     }
-
-    out_capture = cam.stats();
-    out_stage.frames = out_capture.frames;
-    out_stage.detect_ms_avg = detect_t.avg();
-    out_stage.warp_ms_avg = warp_t.avg();
-    out_stage.infer_ms_avg = infer_t.avg();
-    out_stage.total_ms_avg = total_t.avg();
-    out_stage.detect_ms_max = detect_t.max_ms;
-    out_stage.warp_ms_max = warp_t.max_ms;
-    out_stage.infer_ms_max = infer_t.max_ms;
-    out_stage.total_ms_max = total_t.max_ms;
-    out_stage.detector_fps_avg = (out_stage.detect_ms_avg > 0.0) ? (1000.0 / out_stage.detect_ms_avg) : 0.0;
-    out_stage.trigger_count = trigger_count;
-    out_stage.last_red_mean = last_gate.mean_r;
-    out_stage.last_red_score = last_gate.red_score;
-    out_lock = lock;
-
-    cam.close();
-    cv::destroyAllWindows();
-
-    print_capture_stats(cam_cfg, out_capture);
-    append_test_csv(dep_cfg.save_test_csv, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr);
-    write_latest_report_md(dep_cfg.save_report_md, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr, &rois);
-    if (lock.valid) save_homography_json(dep_cfg.save_h_path, lock);
-    if (dep_cfg.save_remap_cache && remap_cache.valid) save_warp_remap_cache(dep_cfg.save_remap_path, remap_cache);
-    save_rois_json(dep_cfg.save_rois_path, rois);
+    cv::destroyWindow("vision_app");
     return true;
+#endif
+}
+
+static inline bool run_deploy(const AppOptions& opt, std::string& err) {
+    CameraCapture cam;
+    if (!cam.open(opt.cam, err)) return false;
+    WarpPackage pack;
+    if (!load_warp_package(opt.load_warp, pack)) {
+        err = "failed to load warp package: " + opt.load_warp;
+        return false;
+    }
+    RoiConfig rois;
+    load_rois_yaml(opt.load_rois, rois);
+    cv::namedWindow("vision_app", cv::WINDOW_AUTOSIZE);
+    cv::Mat frame, warped, valid, display;
+    while (true) {
+        if (!cam.read_latest(frame)) { err = "camera read failed"; return false; }
+        if (!apply_warp(frame, pack, warped, valid)) { err = "apply_warp failed"; return false; }
+        display = compose_preview_with_mask(warped, valid);
+        draw_rois(display, rois, 0);
+        cv::Rect rr = roi_to_rect(rois.red_roi, display.size());
+        cv::Rect ir = roi_to_rect(rois.image_roi, display.size());
+        double valid_ratio_red = static_cast<double>(cv::countNonZero(valid(rr))) / static_cast<double>(rr.area());
+        double valid_ratio_img = static_cast<double>(cv::countNonZero(valid(ir))) / static_cast<double>(ir.area());
+        cv::putText(display, "deploy red_valid=" + cv::format("%.2f", valid_ratio_red) + " image_valid=" + cv::format("%.2f", valid_ratio_img),
+                    {16,24}, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 2);
+        cv::Mat preview = downscale_for_preview(display, opt.preview_soft_max);
+        cv::imshow("vision_app", preview);
+        int key = cv::waitKey(1) & 0xFF;
+        if (key == 'q' || key == 27) break;
+    }
+    cv::destroyWindow("vision_app");
+    return true;
+}
+
+static inline void print_mode_help(const std::string& mode) {
+    if (mode == "bench") {
+        std::cout << "bench: open one camera mode and measure real runtime FPS.\n"
+                  << "Important args: --device --width --height --fps --fourcc --duration --buffer-size --latest-only --drain-grabs\n";
+    } else if (mode == "live") {
+        std::cout << "live: detect AprilTag, preview temporary full-image auto-fit warp, lock, edit ROIs, save precomputation.\n"
+                  << "Important args: --tag-family auto|16|25|36 --target-id --require-target-id 0|1 --manual-lock-only 0|1 --lock-frames N --warp-soft-max N --preview-soft-max N\n"
+                  << "Soft limit behavior: if the fitted warp would exceed --warp-soft-max, it is scaled down automatically. A hard safety cap of 1200 px max dimension is also applied.\n";
+    } else if (mode == "deploy") {
+        std::cout << "deploy: load saved warp package + ROI config and run directly with remap cache.\n"
+                  << "Important args: --load-warp PATH --load-rois PATH --preview-soft-max N\n";
+    } else {
+        std::cout << "probe: list camera-reported formats / resolutions / fps.\n";
+    }
 }
 
 } // namespace vision_app

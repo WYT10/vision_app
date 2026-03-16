@@ -3,18 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cctype>
-#include <deque>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
-#include <limits>
-#include <sstream>
+#include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <opencv2/core.hpp>
-#include <opencv2/core/persistence.hpp>
 #include <opencv2/imgproc.hpp>
 
 #if __has_include(<opencv2/aruco.hpp>)
@@ -26,704 +22,348 @@
 
 namespace vision_app {
 
+struct RoiRatio {
+    double x = 0.10, y = 0.10, w = 0.20, h = 0.20;
+};
+struct RoiConfig {
+    RoiRatio red_roi{0.10,0.10,0.20,0.20};
+    RoiRatio image_roi{0.35,0.15,0.45,0.45};
+};
+
 struct AprilTagConfig {
-    std::string family = "auto";          // auto | 16 | 25 | 36
+    std::string family = "auto"; // auto|16|25|36
     int target_id = 0;
     bool require_target_id = true;
-    bool manual_lock_only = false;
+    bool manual_lock_only = true;
     int lock_frames = 8;
-    double max_center_jitter_px = 3.0;
-    double max_corner_jitter_px = 4.0;
-    double min_quad_area_ratio = 0.0025;
-    int threads = 2;
-    float decimate = 1.0f;
-    float blur_sigma = 0.0f;
-    bool refine_edges = true;
-    bool show_family = true;
 };
 
 struct AprilTagDetection {
     bool found = false;
-    std::string family = "";
+    std::string family;
     int id = -1;
-    double area = 0.0;
-    double decision_margin = 0.0;
-    int hamming = 0;
     std::array<cv::Point2f, 4> corners{};
     cv::Point2f center{};
+    float score = 0.0f;
 };
 
-struct HomographyLock {
+struct WarpPackage {
     bool valid = false;
-    std::string family = "";
+    std::string family;
     int id = -1;
-    cv::Size source_size{0, 0};
-    cv::Size tag_rect_size{720, 720};
-    cv::Size warp_size{720, 720};
-    cv::Mat H;     // src -> final displayed warped canvas
-    cv::Mat Hinv;  // final displayed warped canvas -> src
-    std::array<cv::Point2f, 4> locked_corners{};
-};
-
-struct WarpRemapCache {
-    bool valid = false;
-    bool fixed_point = true;
-    cv::Size source_size{0, 0};
-    cv::Size warp_size{0, 0};
-    cv::Mat map1;
+    int src_w = 0;
+    int src_h = 0;
+    int warp_w = 0;
+    int warp_h = 0;
+    double soft_limit = 900.0;
+    cv::Mat H;           // 3x3 CV_64F
+    cv::Mat Hinv;        // 3x3 CV_64F
+    cv::Mat map1;        // fixed-point or float map
     cv::Mat map2;
+    cv::Mat valid_mask;  // CV_8U
 };
 
-struct RoiRatio {
-    double x = 0.0;
-    double y = 0.0;
-    double w = 0.0;
-    double h = 0.0;
-};
-
-struct RoiSet {
-    RoiRatio red_roi{0.05, 0.10, 0.20, 0.20};
-    RoiRatio image_roi{0.30, 0.10, 0.50, 0.60};
-};
-
-struct RedGateResult {
-    bool valid = false;
-    bool triggered = false;
-    double mean_b = 0.0;
-    double mean_g = 0.0;
-    double mean_r = 0.0;
-    double red_score = 0.0;
-};
-
-struct InferStubResult {
-    bool valid = false;
-    double gray_mean = 0.0;
-    double gray_stddev = 0.0;
-    double edge_ratio = 0.0;
-    std::string summary;
-};
-
-static bool clamp_and_validate_roi(RoiRatio& roi) {
-    auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
-    roi.x = clamp01(roi.x);
-    roi.y = clamp01(roi.y);
-    roi.w = clamp01(roi.w);
-    roi.h = clamp01(roi.h);
-    if (roi.x + roi.w > 1.0) roi.w = 1.0 - roi.x;
-    if (roi.y + roi.h > 1.0) roi.h = 1.0 - roi.y;
-    return roi.w > 0.0 && roi.h > 0.0;
+static inline double clamp01(double v) { return std::max(0.0, std::min(1.0, v)); }
+static inline bool validate_roi(RoiRatio& r) {
+    r.x = clamp01(r.x); r.y = clamp01(r.y); r.w = clamp01(r.w); r.h = clamp01(r.h);
+    if (r.w <= 0.0 || r.h <= 0.0) return false;
+    if (r.x + r.w > 1.0) r.w = 1.0 - r.x;
+    if (r.y + r.h > 1.0) r.h = 1.0 - r.y;
+    return r.w > 0.0 && r.h > 0.0;
+}
+static inline cv::Rect roi_to_rect(const RoiRatio& rr, const cv::Size& sz) {
+    RoiRatio r = rr; validate_roi(r);
+    int x = std::clamp(static_cast<int>(std::round(r.x * sz.width)), 0, std::max(0, sz.width - 1));
+    int y = std::clamp(static_cast<int>(std::round(r.y * sz.height)), 0, std::max(0, sz.height - 1));
+    int w = std::max(1, static_cast<int>(std::round(r.w * sz.width)));
+    int h = std::max(1, static_cast<int>(std::round(r.h * sz.height)));
+    if (x + w > sz.width) w = std::max(1, sz.width - x);
+    if (y + h > sz.height) h = std::max(1, sz.height - y);
+    return {x,y,w,h};
 }
 
-static cv::Rect ratio_to_rect(const RoiRatio& roi, const cv::Size& image_size) {
-    RoiRatio r = roi;
-    clamp_and_validate_roi(r);
-    int x = static_cast<int>(std::round(r.x * image_size.width));
-    int y = static_cast<int>(std::round(r.y * image_size.height));
-    int w = std::max(1, static_cast<int>(std::round(r.w * image_size.width)));
-    int h = std::max(1, static_cast<int>(std::round(r.h * image_size.height)));
-    x = std::max(0, std::min(x, std::max(0, image_size.width - 1)));
-    y = std::max(0, std::min(y, std::max(0, image_size.height - 1)));
-    if (x + w > image_size.width) w = image_size.width - x;
-    if (y + h > image_size.height) h = image_size.height - y;
-    return cv::Rect(x, y, std::max(1, w), std::max(1, h));
-}
-
-static cv::Mat crop_roi_clone(const cv::Mat& img, const RoiRatio& roi) {
-    if (img.empty()) return {};
-    const cv::Rect r = ratio_to_rect(roi, img.size());
-    if (r.width <= 0 || r.height <= 0) return {};
-    return img(r).clone();
-}
-
-static std::array<cv::Point2f, 4> make_tag_rect_quad(const cv::Size& size) {
-    return {
-        cv::Point2f(0.0f, 0.0f),
-        cv::Point2f(static_cast<float>(size.width - 1), 0.0f),
-        cv::Point2f(static_cast<float>(size.width - 1), static_cast<float>(size.height - 1)),
-        cv::Point2f(0.0f, static_cast<float>(size.height - 1))
-    };
-}
-
-static std::string normalize_family_token(std::string family) {
-    std::transform(family.begin(), family.end(), family.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-    if (family == "tag16h5" || family == "16" || family == "apriltag16" || family == "16h5") return "16";
-    if (family == "tag25h9" || family == "25" || family == "apriltag25" || family == "25h9") return "25";
-    if (family == "tag36h11" || family == "tag36h10" || family == "36" || family == "apriltag36" || family == "36h11" || family == "36h10") return "36";
-    if (family == "auto" || family.empty()) return "auto";
-    return family;
-}
-
-static std::vector<std::string> tag_family_search_order(const std::string& family_token) {
-    const std::string f = normalize_family_token(family_token);
-    if (f == "16") return {"16"};
-    if (f == "25") return {"25"};
-    if (f == "36") return {"36"};
-    return {"36", "25", "16"};
-}
-
-static std::string family_label(const std::string& token) {
-    const std::string f = normalize_family_token(token);
-    if (f == "16") return "tag16h5";
-    if (f == "25") return "tag25h9";
-    if (f == "36") return "tag36h11";
-    return "unknown";
+static inline std::array<cv::Point2f,4> canonical_square(float side) {
+    const float s = side - 1.0f;
+    return { cv::Point2f(0,0), cv::Point2f(s,0), cv::Point2f(s,s), cv::Point2f(0,s) };
 }
 
 #if VISION_APP_HAS_ARUCO
-static int family_token_to_dict(const std::string& token) {
-    const std::string f = normalize_family_token(token);
-    if (f == "16") return cv::aruco::DICT_APRILTAG_16h5;
-    if (f == "25") return cv::aruco::DICT_APRILTAG_25h9;
-    return cv::aruco::DICT_APRILTAG_36h11;
+static inline bool detect_family_once(const cv::Mat& gray, int dict_id, const std::string& family_name, const AprilTagConfig& cfg, AprilTagDetection& out) {
+    auto dict = cv::aruco::getPredefinedDictionary(dict_id);
+    cv::aruco::DetectorParameters params;
+    params.cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
+    cv::aruco::ArucoDetector detector(dict, params);
+    std::vector<int> ids;
+    std::vector<std::vector<cv::Point2f>> corners, rejected;
+    detector.detectMarkers(gray, corners, ids, rejected);
+    if (ids.empty()) return false;
+    int best = -1;
+    float best_score = -1.0f;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (cfg.require_target_id && ids[i] != cfg.target_id) continue;
+        float peri = static_cast<float>(cv::arcLength(corners[i], true));
+        if (peri > best_score) { best_score = peri; best = static_cast<int>(i); }
+    }
+    if (best < 0) return false;
+    out = {};
+    out.found = true;
+    out.family = family_name;
+    out.id = ids[best];
+    out.score = best_score;
+    for (int k = 0; k < 4; ++k) out.corners[k] = corners[best][k];
+    out.center = 0.25f * (out.corners[0] + out.corners[1] + out.corners[2] + out.corners[3]);
+    return true;
 }
 #endif
 
-static bool detect_apriltag_best(const cv::Mat& bgr_or_gray,
-                                 const AprilTagConfig& cfg,
-                                 AprilTagDetection& out,
-                                 std::string& err) {
+static inline bool detect_apriltag_best(const cv::Mat& frame_bgr, const AprilTagConfig& cfg, AprilTagDetection& out, std::string& err) {
+    (void)err;
+#if !VISION_APP_HAS_ARUCO
     out = {};
-#if VISION_APP_HAS_ARUCO
+    return false;
+#else
     cv::Mat gray;
-    if (bgr_or_gray.channels() == 1) gray = bgr_or_gray;
-    else cv::cvtColor(bgr_or_gray, gray, cv::COLOR_BGR2GRAY);
+    if (frame_bgr.channels() == 1) gray = frame_bgr;
+    else cv::cvtColor(frame_bgr, gray, cv::COLOR_BGR2GRAY);
 
-    auto search_order = tag_family_search_order(cfg.family);
-    double best_score = -1.0;
+    std::vector<std::pair<int,std::string>> tries;
+    if (cfg.family == "16") tries.push_back({cv::aruco::DICT_APRILTAG_16h5, "16"});
+    else if (cfg.family == "25") tries.push_back({cv::aruco::DICT_APRILTAG_25h9, "25"});
+    else if (cfg.family == "36") tries.push_back({cv::aruco::DICT_APRILTAG_36h11, "36"});
+    else tries = {{cv::aruco::DICT_APRILTAG_36h11, "36"}, {cv::aruco::DICT_APRILTAG_25h9, "25"}, {cv::aruco::DICT_APRILTAG_16h5, "16"}};
 
-    for (const auto& fam : search_order) {
-        auto dict = cv::aruco::getPredefinedDictionary(family_token_to_dict(fam));
-        auto params = cv::aruco::DetectorParameters();
-        params.cornerRefinementMethod = cfg.refine_edges ? cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
-        params.aprilTagQuadDecimate = cfg.decimate;
-        params.aprilTagQuadSigma = cfg.blur_sigma;
-        params.useAruco3Detection = false;
-
-        cv::aruco::ArucoDetector detector(dict, params);
-        std::vector<int> ids;
-        std::vector<std::vector<cv::Point2f>> corners;
-        detector.detectMarkers(gray, corners, ids);
-
-        for (size_t i = 0; i < ids.size(); ++i) {
-            if (cfg.require_target_id && ids[i] != cfg.target_id) continue;
-            if (corners[i].size() != 4) continue;
-            const double area = std::abs(cv::contourArea(corners[i]));
-            const double score = area;
-            if (score <= best_score) continue;
-            best_score = score;
-            out.found = true;
-            out.family = family_label(fam);
-            out.id = ids[i];
-            out.area = area;
-            out.corners = {corners[i][0], corners[i][1], corners[i][2], corners[i][3]};
-            out.center = 0.25f * (corners[i][0] + corners[i][1] + corners[i][2] + corners[i][3]);
+    AprilTagDetection best{};
+    for (const auto& t : tries) {
+        AprilTagDetection d;
+        if (detect_family_once(gray, t.first, t.second, cfg, d)) {
+            if (!best.found || d.score > best.score) best = d;
         }
     }
-    return true;
-#else
-    (void)bgr_or_gray; (void)cfg;
-    err = "AprilTag support unavailable. Install OpenCV aruco/contrib or swap in an AprilTag backend.";
-    return false;
+    out = best;
+    return out.found;
 #endif
 }
 
 class TagLocker {
 public:
-    explicit TagLocker(const AprilTagConfig& cfg) : cfg_(cfg) {}
-
-    void reset() {
-        hist_.clear();
-        locked_ = {};
-        last_candidate_ = {};
+    explicit TagLocker(int req = 8) : required_(std::max(1, req)) {}
+    void reset() { count_ = 0; locked_ = false; last_ = {}; }
+    bool update(const AprilTagDetection& d) {
+        if (!d.found) { reset(); return false; }
+        if (!last_.found || last_.id != d.id || last_.family != d.family) count_ = 1;
+        else ++count_;
+        last_ = d;
+        locked_ = (count_ >= required_);
+        return locked_;
     }
-
-    bool update(const AprilTagDetection& det, const cv::Size& image_size, bool allow_lock = true) {
-        last_candidate_ = det;
-        if (!det.found) {
-            if (!allow_lock) return false;
-            reset();
-            return false;
-        }
-
-        const double area_ratio = det.area / std::max(1.0, static_cast<double>(image_size.area()));
-        if (area_ratio < cfg_.min_quad_area_ratio) {
-            if (!allow_lock) return false;
-            reset();
-            return false;
-        }
-
-        if (!hist_.empty()) {
-            if (hist_.back().id != det.id || hist_.back().family != det.family) {
-                hist_.clear();
-            }
-        }
-
-        hist_.push_back(det);
-        while (static_cast<int>(hist_.size()) > cfg_.lock_frames) hist_.pop_front();
-        if (!allow_lock || static_cast<int>(hist_.size()) < cfg_.lock_frames) return false;
-
-        const cv::Point2f ref_center = hist_.front().center;
-        const auto& ref_corners = hist_.front().corners;
-        for (const auto& d : hist_) {
-            const double dc = cv::norm(d.center - ref_center);
-            if (dc > cfg_.max_center_jitter_px) {
-                hist_.clear();
-                return false;
-            }
-            for (int i = 0; i < 4; ++i) {
-                const double dj = cv::norm(d.corners[i] - ref_corners[i]);
-                if (dj > cfg_.max_corner_jitter_px) {
-                    hist_.clear();
-                    return false;
-                }
-            }
-        }
-
-        locked_ = hist_.back();
-        locked_.found = true;
-        return true;
-    }
-
-    bool force_lock(const AprilTagDetection& det, const cv::Size& image_size) {
-        if (!det.found) return false;
-        const double area_ratio = det.area / std::max(1.0, static_cast<double>(image_size.area()));
-        if (area_ratio < cfg_.min_quad_area_ratio) return false;
-        locked_ = det;
-        locked_.found = true;
-        return true;
-    }
-
-    bool locked() const { return locked_.found; }
-    AprilTagDetection locked_det() const { return locked_; }
-    AprilTagDetection last_candidate() const { return last_candidate_; }
-    int history_size() const { return static_cast<int>(hist_.size()); }
-
+    bool locked() const { return locked_; }
+    AprilTagDetection current() const { return last_; }
 private:
-    AprilTagConfig cfg_;
-    std::deque<AprilTagDetection> hist_;
-    AprilTagDetection locked_{};
-    AprilTagDetection last_candidate_{};
+    int required_ = 8;
+    int count_ = 0;
+    bool locked_ = false;
+    AprilTagDetection last_{};
 };
 
-static cv::Mat matx_to_mat(const cv::Matx33d& M) {
-    cv::Mat out(3, 3, CV_64F);
-    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out.at<double>(r, c) = M(r, c);
-    return out;
-}
+static inline bool build_warp_package_from_detection(const AprilTagDetection& det,
+                                                     const cv::Size& src_size,
+                                                     int warp_soft_max,
+                                                     WarpPackage& pack,
+                                                     std::string& err) {
+    if (!det.found) { err = "no detection to build warp"; return false; }
+    if (src_size.width <= 0 || src_size.height <= 0) { err = "invalid source size"; return false; }
 
-static cv::Matx33d mat_to_matx(const cv::Mat& m) {
-    cv::Matx33d out{};
-    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out(r, c) = m.at<double>(r, c);
-    return out;
-}
-
-static bool compute_full_view_homography_from_tag_quad(const AprilTagDetection& det,
-                                                       const cv::Size& source_size,
-                                                       const cv::Size& tag_rect_size,
-                                                       int max_view_long_side,
-                                                       HomographyLock& out) {
-    if (!det.found || source_size.width <= 0 || source_size.height <= 0) return false;
-    if (tag_rect_size.width <= 0 || tag_rect_size.height <= 0) return false;
-
+    const float canonical_side = 1000.0f;
     std::vector<cv::Point2f> src(4), dst(4);
     for (int i = 0; i < 4; ++i) src[i] = det.corners[i];
-    const auto quad = make_tag_rect_quad(tag_rect_size);
-    for (int i = 0; i < 4; ++i) dst[i] = quad[i];
+    auto canon = canonical_square(canonical_side);
+    for (int i = 0; i < 4; ++i) dst[i] = canon[i];
 
-    cv::Mat H_base = cv::getPerspectiveTransform(src, dst);
-    if (H_base.empty()) return false;
+    cv::Mat H0 = cv::getPerspectiveTransform(src, dst);
+    if (H0.empty()) { err = "getPerspectiveTransform failed"; return false; }
 
-    std::vector<cv::Point2f> frame_corners = {
+    std::vector<cv::Point2f> image_corners = {
         {0.0f, 0.0f},
-        {static_cast<float>(source_size.width - 1), 0.0f},
-        {static_cast<float>(source_size.width - 1), static_cast<float>(source_size.height - 1)},
-        {0.0f, static_cast<float>(source_size.height - 1)}
+        {static_cast<float>(src_size.width - 1), 0.0f},
+        {static_cast<float>(src_size.width - 1), static_cast<float>(src_size.height - 1)},
+        {0.0f, static_cast<float>(src_size.height - 1)}
     };
-    std::vector<cv::Point2f> warped_frame_corners;
-    cv::perspectiveTransform(frame_corners, warped_frame_corners, H_base);
-    if (warped_frame_corners.size() != 4) return false;
+    std::vector<cv::Point2f> transformed;
+    cv::perspectiveTransform(image_corners, transformed, H0);
 
-    double min_x = std::numeric_limits<double>::infinity();
-    double min_y = std::numeric_limits<double>::infinity();
-    double max_x = -std::numeric_limits<double>::infinity();
-    double max_y = -std::numeric_limits<double>::infinity();
-    for (const auto& p : warped_frame_corners) {
-        min_x = std::min(min_x, static_cast<double>(p.x));
-        min_y = std::min(min_y, static_cast<double>(p.y));
-        max_x = std::max(max_x, static_cast<double>(p.x));
-        max_y = std::max(max_y, static_cast<double>(p.y));
+    float min_x = transformed[0].x, max_x = transformed[0].x;
+    float min_y = transformed[0].y, max_y = transformed[0].y;
+    for (const auto& p : transformed) {
+        min_x = std::min(min_x, p.x); max_x = std::max(max_x, p.x);
+        min_y = std::min(min_y, p.y); max_y = std::max(max_y, p.y);
     }
+    double bbox_w = std::max(1.0, static_cast<double>(max_x - min_x));
+    double bbox_h = std::max(1.0, static_cast<double>(max_y - min_y));
+    double scale = 1.0;
+    const double max_dim = std::max(bbox_w, bbox_h);
+    if (warp_soft_max > 0 && max_dim > static_cast<double>(warp_soft_max)) {
+        scale = static_cast<double>(warp_soft_max) / max_dim;
+    }
+    // hard limit for Pi stability
+    if (max_dim * scale > 1200.0) scale *= 1200.0 / (max_dim * scale);
 
-    if (!(max_x > min_x) || !(max_y > min_y)) return false;
+    cv::Mat T = (cv::Mat_<double>(3,3) << 1,0,-min_x, 0,1,-min_y, 0,0,1);
+    cv::Mat S = (cv::Mat_<double>(3,3) << scale,0,0, 0,scale,0, 0,0,1);
+    cv::Mat H = S * T * H0;
+    cv::Mat Hinv = H.inv();
+    if (H.empty() || Hinv.empty()) { err = "homography inversion failed"; return false; }
 
-    cv::Matx33d M_base = mat_to_matx(H_base);
-    cv::Matx33d T(1.0, 0.0, -min_x,
-                  0.0, 1.0, -min_y,
-                  0.0, 0.0, 1.0);
-    cv::Matx33d H_view = T * M_base;
+    int out_w = std::max(1, static_cast<int>(std::ceil(bbox_w * scale)));
+    int out_h = std::max(1, static_cast<int>(std::ceil(bbox_h * scale)));
+    out_w = std::min(out_w, 1200);
+    out_h = std::min(out_h, 1200);
 
-    int out_w = std::max(1, static_cast<int>(std::ceil(max_x - min_x)));
-    int out_h = std::max(1, static_cast<int>(std::ceil(max_y - min_y)));
+    cv::Mat mapx(out_h, out_w, CV_32FC1);
+    cv::Mat mapy(out_h, out_w, CV_32FC1);
+    cv::Mat valid(out_h, out_w, CV_8UC1, cv::Scalar(0));
 
-    if (max_view_long_side > 0) {
-        const int long_side = std::max(out_w, out_h);
-        if (long_side > max_view_long_side) {
-            const double scale = static_cast<double>(max_view_long_side) / static_cast<double>(long_side);
-            cv::Matx33d S(scale, 0.0, 0.0,
-                          0.0, scale, 0.0,
-                          0.0, 0.0, 1.0);
-            H_view = S * H_view;
-            out_w = std::max(1, static_cast<int>(std::ceil(out_w * scale)));
-            out_h = std::max(1, static_cast<int>(std::ceil(out_h * scale)));
+    const double h00 = Hinv.at<double>(0,0), h01 = Hinv.at<double>(0,1), h02 = Hinv.at<double>(0,2);
+    const double h10 = Hinv.at<double>(1,0), h11 = Hinv.at<double>(1,1), h12 = Hinv.at<double>(1,2);
+    const double h20 = Hinv.at<double>(2,0), h21 = Hinv.at<double>(2,1), h22 = Hinv.at<double>(2,2);
+
+    for (int y = 0; y < out_h; ++y) {
+        float* mx = mapx.ptr<float>(y);
+        float* my = mapy.ptr<float>(y);
+        uchar* vm = valid.ptr<uchar>(y);
+        for (int x = 0; x < out_w; ++x) {
+            const double X = static_cast<double>(x);
+            const double Y = static_cast<double>(y);
+            const double w = h20*X + h21*Y + h22;
+            const double sx = (h00*X + h01*Y + h02) / w;
+            const double sy = (h10*X + h11*Y + h12) / w;
+            mx[x] = static_cast<float>(sx);
+            my[x] = static_cast<float>(sy);
+            vm[x] = (sx >= 0.0 && sx < static_cast<double>(src_size.width) && sy >= 0.0 && sy < static_cast<double>(src_size.height)) ? 255 : 0;
         }
     }
 
-    out = {};
-    out.valid = true;
-    out.family = det.family;
-    out.id = det.id;
-    out.source_size = source_size;
-    out.tag_rect_size = tag_rect_size;
-    out.warp_size = cv::Size(out_w, out_h);
-    out.H = matx_to_mat(H_view);
-    out.Hinv = out.H.inv();
-    out.locked_corners = det.corners;
-    return !out.H.empty() && !out.Hinv.empty();
+    cv::Mat map1, map2;
+    cv::convertMaps(mapx, mapy, map1, map2, CV_16SC2, true);
+
+    pack = {};
+    pack.valid = true;
+    pack.family = det.family;
+    pack.id = det.id;
+    pack.src_w = src_size.width;
+    pack.src_h = src_size.height;
+    pack.warp_w = out_w;
+    pack.warp_h = out_h;
+    pack.soft_limit = warp_soft_max;
+    pack.H = H;
+    pack.Hinv = Hinv;
+    pack.map1 = map1;
+    pack.map2 = map2;
+    pack.valid_mask = valid;
+    return true;
 }
 
-static bool warp_full_frame(const cv::Mat& src, cv::Mat& dst, const HomographyLock& lock, int interp = cv::INTER_LINEAR) {
-    if (!lock.valid || lock.H.empty() || src.empty()) return false;
-    cv::warpPerspective(src, dst, lock.H, lock.warp_size, interp, cv::BORDER_CONSTANT);
-    return !dst.empty();
+static inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& warped, cv::Mat& valid_mask) {
+    if (!pack.valid || src.empty()) return false;
+    cv::remap(src, warped, pack.map1, pack.map2, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0,0,0));
+    valid_mask = pack.valid_mask;
+    return !warped.empty();
 }
 
-static bool build_warp_remap_cache(const HomographyLock& lock,
-                                   const cv::Size& source_size,
-                                   WarpRemapCache& cache,
-                                   bool fixed_point = true) {
-    if (!lock.valid || lock.Hinv.empty()) return false;
-    if (source_size.width <= 0 || source_size.height <= 0) return false;
-    if (lock.warp_size.width <= 0 || lock.warp_size.height <= 0) return false;
-
-    cv::Mat map_x(lock.warp_size, CV_32FC1);
-    cv::Mat map_y(lock.warp_size, CV_32FC1);
-    cv::Matx33d M = mat_to_matx(lock.Hinv);
-
-    for (int y = 0; y < lock.warp_size.height; ++y) {
-        float* mx = map_x.ptr<float>(y);
-        float* my = map_y.ptr<float>(y);
-        for (int x = 0; x < lock.warp_size.width; ++x) {
-            const double xx = M(0,0) * x + M(0,1) * y + M(0,2);
-            const double yy = M(1,0) * x + M(1,1) * y + M(1,2);
-            const double ww = M(2,0) * x + M(2,1) * y + M(2,2);
-            if (std::abs(ww) < 1e-12) {
-                mx[x] = -1.0f;
-                my[x] = -1.0f;
-            } else {
-                mx[x] = static_cast<float>(xx / ww);
-                my[x] = static_cast<float>(yy / ww);
-            }
-        }
-    }
-
-    cache = {};
-    cache.valid = true;
-    cache.fixed_point = fixed_point;
-    cache.source_size = source_size;
-    cache.warp_size = lock.warp_size;
-    if (fixed_point) cv::convertMaps(map_x, map_y, cache.map1, cache.map2, CV_16SC2);
-    else {
-        cache.map1 = map_x;
-        cache.map2 = map_y;
-    }
-    return !cache.map1.empty();
+static inline cv::Mat compose_preview_with_mask(const cv::Mat& warped, const cv::Mat& valid_mask) {
+    cv::Mat out(warped.size(), warped.type(), cv::Scalar(55,55,55));
+    if (warped.empty()) return out;
+    warped.copyTo(out, valid_mask);
+    return out;
 }
 
-static bool remap_cache_matches(const WarpRemapCache& cache,
-                                const cv::Size& source_size,
-                                const cv::Size& warp_size) {
-    return cache.valid && cache.source_size == source_size && cache.warp_size == warp_size && !cache.map1.empty();
+static inline void draw_detection(cv::Mat& img, const AprilTagDetection& det, bool locked) {
+    if (!det.found) return;
+    const cv::Scalar color = locked ? cv::Scalar(0,255,0) : cv::Scalar(0,255,255);
+    for (int i = 0; i < 4; ++i) cv::line(img, det.corners[i], det.corners[(i+1)%4], color, 2);
+    cv::circle(img, det.center, 4, cv::Scalar(255,0,255), -1);
+    std::string text = "tag family=" + det.family + " id=" + std::to_string(det.id) + (locked ? " [LOCKED]" : "");
+    cv::putText(img, text, {20,30}, cv::FONT_HERSHEY_SIMPLEX, 0.7, color, 2);
 }
 
-static bool warp_full_frame_cached(const cv::Mat& src,
-                                   cv::Mat& dst,
-                                   const WarpRemapCache& cache,
-                                   int interp = cv::INTER_LINEAR) {
-    if (src.empty() || !cache.valid || cache.map1.empty()) return false;
-    if (src.size() != cache.source_size) return false;
-    cv::remap(src, dst, cache.map1, cache.map2, interp, cv::BORDER_CONSTANT);
-    return !dst.empty();
+static inline void draw_rois(cv::Mat& img, const RoiConfig& rois, int selected) {
+    const cv::Rect rr = roi_to_rect(rois.red_roi, img.size());
+    const cv::Rect ir = roi_to_rect(rois.image_roi, img.size());
+    cv::rectangle(img, rr, selected == 1 ? cv::Scalar(0,255,255) : cv::Scalar(0,0,255), 2);
+    cv::putText(img, "red_roi", rr.tl() + cv::Point(4,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,0,255), 2);
+    cv::rectangle(img, ir, selected == 2 ? cv::Scalar(0,255,255) : cv::Scalar(255,0,0), 2);
+    cv::putText(img, "image_roi", ir.tl() + cv::Point(4,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,0,0), 2);
 }
 
-static bool save_warp_remap_cache(const std::string& path, const WarpRemapCache& cache) {
-    if (!cache.valid || cache.map1.empty()) return false;
+static inline bool save_rois_yaml(const std::string& path, const RoiConfig& rois) {
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     cv::FileStorage fs(path, cv::FileStorage::WRITE);
     if (!fs.isOpened()) return false;
-    fs << "valid" << true;
-    fs << "fixed_point" << cache.fixed_point;
-    fs << "source_width" << cache.source_size.width;
-    fs << "source_height" << cache.source_size.height;
-    fs << "warp_width" << cache.warp_size.width;
-    fs << "warp_height" << cache.warp_size.height;
-    fs << "map1" << cache.map1;
-    fs << "map2" << cache.map2;
-    fs.release();
+    fs << "red_roi" << "{" << "x" << rois.red_roi.x << "y" << rois.red_roi.y << "w" << rois.red_roi.w << "h" << rois.red_roi.h << "}";
+    fs << "image_roi" << "{" << "x" << rois.image_roi.x << "y" << rois.image_roi.y << "w" << rois.image_roi.w << "h" << rois.image_roi.h << "}";
     return true;
 }
 
-static bool load_warp_remap_cache(const std::string& path, WarpRemapCache& cache) {
+static inline bool load_rois_yaml(const std::string& path, RoiConfig& rois) {
     cv::FileStorage fs(path, cv::FileStorage::READ);
     if (!fs.isOpened()) return false;
-    int sw = 0, sh = 0, ww = 0, wh = 0;
-    int fp = 1;
-    cv::Mat map1, map2;
-    fs["source_width"] >> sw;
-    fs["source_height"] >> sh;
-    fs["warp_width"] >> ww;
-    fs["warp_height"] >> wh;
-    fs["fixed_point"] >> fp;
-    fs["map1"] >> map1;
-    fs["map2"] >> map2;
-    fs.release();
-    if (sw <= 0 || sh <= 0 || ww <= 0 || wh <= 0 || map1.empty()) return false;
-    cache = {};
-    cache.valid = true;
-    cache.fixed_point = (fp != 0);
-    cache.source_size = cv::Size(sw, sh);
-    cache.warp_size = cv::Size(ww, wh);
-    cache.map1 = map1;
-    cache.map2 = map2;
-    return true;
-}
-
-static RedGateResult evaluate_red_gate(const cv::Mat& red_roi_bgr,
-                                       double red_mean_threshold,
-                                       double red_dominance_threshold) {
-    RedGateResult out{};
-    if (red_roi_bgr.empty() || red_roi_bgr.channels() != 3) return out;
-    const cv::Scalar mean_bgr = cv::mean(red_roi_bgr);
-    out.valid = true;
-    out.mean_b = mean_bgr[0];
-    out.mean_g = mean_bgr[1];
-    out.mean_r = mean_bgr[2];
-    out.red_score = out.mean_r - std::max(out.mean_b, out.mean_g);
-    out.triggered = (out.mean_r >= red_mean_threshold) && (out.red_score >= red_dominance_threshold);
-    return out;
-}
-
-static InferStubResult run_infer_stub(const cv::Mat& image_roi_bgr) {
-    InferStubResult out{};
-    if (image_roi_bgr.empty()) return out;
-    cv::Mat gray;
-    if (image_roi_bgr.channels() == 1) gray = image_roi_bgr;
-    else cv::cvtColor(image_roi_bgr, gray, cv::COLOR_BGR2GRAY);
-    cv::Scalar mean_v, std_v;
-    cv::meanStdDev(gray, mean_v, std_v);
-    cv::Mat edges;
-    cv::Canny(gray, edges, 60.0, 120.0);
-    const double edge_pixels = static_cast<double>(cv::countNonZero(edges));
-    const double total_pixels = std::max(1.0, static_cast<double>(gray.total()));
-    out.valid = true;
-    out.gray_mean = mean_v[0];
-    out.gray_stddev = std_v[0];
-    out.edge_ratio = edge_pixels / total_pixels;
-    std::ostringstream oss;
-    oss << "infer_stub gray_mean=" << std::fixed << std::setprecision(1) << out.gray_mean
-        << " std=" << out.gray_stddev
-        << " edge_ratio=" << out.edge_ratio;
-    out.summary = oss.str();
-    return out;
-}
-
-static void draw_detection_overlay(cv::Mat& frame, const AprilTagDetection& det, bool locked) {
-    if (!det.found) {
-        cv::putText(frame, "AprilTag: not found", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0, 0, 255}, 2);
-        return;
-    }
-    const cv::Scalar color = locked ? cv::Scalar(0,255,0) : cv::Scalar(0,255,255);
-    for (int i = 0; i < 4; ++i) cv::line(frame, det.corners[i], det.corners[(i + 1) % 4], color, 2);
-    cv::circle(frame, det.center, 4, {255, 0, 255}, -1);
-    std::ostringstream oss;
-    oss << det.family << " id=" << det.id;
-    if (locked) oss << " [LOCKED]";
-    cv::putText(frame, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
-}
-
-static void draw_roi_overlay(cv::Mat& warped,
-                             const RoiSet& rois,
-                             const HomographyLock& lock,
-                             char selected_roi = '1',
-                             const RedGateResult* gate = nullptr,
-                             const InferStubResult* infer = nullptr) {
-    const cv::Rect rr = ratio_to_rect(rois.red_roi, warped.size());
-    const cv::Rect ir = ratio_to_rect(rois.image_roi, warped.size());
-    const int red_thick = (selected_roi == '1') ? 3 : 2;
-    const int img_thick = (selected_roi == '2') ? 3 : 2;
-    cv::rectangle(warped, rr, {0,0,255}, red_thick);
-    cv::putText(warped, "red_roi", rr.tl() + cv::Point(4, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, {0,0,255}, 2);
-    cv::rectangle(warped, ir, {255,0,0}, img_thick);
-    cv::putText(warped, "image_roi", ir.tl() + cv::Point(4, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, {255,0,0}, 2);
-    std::ostringstream oss;
-    oss << "Warp lock: " << lock.family << " id=" << lock.id << "  canvas=" << lock.warp_size.width << "x" << lock.warp_size.height;
-    cv::putText(warped, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {0,255,0}, 2);
-    if (gate && gate->valid) {
-        std::ostringstream gs;
-        gs << "red_mean=" << std::fixed << std::setprecision(1) << gate->mean_r
-           << " red_score=" << gate->red_score
-           << " gate=" << (gate->triggered ? "TRIGGER" : "idle");
-        cv::putText(warped, gs.str(), {20, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.58,
-                    gate->triggered ? cv::Scalar(0,255,255) : cv::Scalar(220,220,220), 2);
-    }
-    if (infer && infer->valid) {
-        cv::putText(warped, infer->summary, {20, 82}, cv::FONT_HERSHEY_SIMPLEX, 0.52, {255,255,255}, 1);
-    }
-}
-
-static bool save_homography_json(const std::string& path, const HomographyLock& lock) {
-    if (!lock.valid || lock.H.empty()) return false;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream out(path, std::ios::trunc);
-    if (!out.is_open()) return false;
-    out << std::fixed << std::setprecision(10);
-    out << "{\n";
-    out << "  \"valid\": true,\n";
-    out << "  \"family\": \"" << lock.family << "\",\n";
-    out << "  \"id\": " << lock.id << ",\n";
-    out << "  \"source_width\": " << lock.source_size.width << ",\n";
-    out << "  \"source_height\": " << lock.source_size.height << ",\n";
-    out << "  \"tag_rect_width\": " << lock.tag_rect_size.width << ",\n";
-    out << "  \"tag_rect_height\": " << lock.tag_rect_size.height << ",\n";
-    out << "  \"warp_width\": " << lock.warp_size.width << ",\n";
-    out << "  \"warp_height\": " << lock.warp_size.height << ",\n";
-    out << "  \"H\": [\n";
-    for (int r = 0; r < 3; ++r) {
-        out << "    [";
-        for (int c = 0; c < 3; ++c) {
-            out << lock.H.at<double>(r, c);
-            if (c < 2) out << ", ";
-        }
-        out << "]";
-        if (r < 2) out << ',';
-        out << "\n";
-    }
-    out << "  ]\n";
-    out << "}\n";
-    return true;
-}
-
-static bool save_rois_json(const std::string& path, const RoiSet& rois) {
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream out(path, std::ios::trunc);
-    if (!out.is_open()) return false;
-    out << std::fixed << std::setprecision(6);
-    out << "{\n";
-    out << "  \"red_roi\": {\"x\": " << rois.red_roi.x << ", \"y\": " << rois.red_roi.y << ", \"w\": " << rois.red_roi.w << ", \"h\": " << rois.red_roi.h << "},\n";
-    out << "  \"image_roi\": {\"x\": " << rois.image_roi.x << ", \"y\": " << rois.image_roi.y << ", \"w\": " << rois.image_roi.w << ", \"h\": " << rois.image_roi.h << "}\n";
-    out << "}\n";
-    return true;
-}
-
-static bool extract_double_after(const std::string& s, size_t start, double& value) {
-    size_t p = start;
-    while (p < s.size() && !(std::isdigit(static_cast<unsigned char>(s[p])) || s[p] == '-' || s[p] == '.')) ++p;
-    if (p >= s.size()) return false;
-    size_t e = p + 1;
-    while (e < s.size() && (std::isdigit(static_cast<unsigned char>(s[e])) || s[e] == '.' || s[e] == '-' || s[e] == 'e' || s[e] == 'E' || s[e] == '+')) ++e;
-    value = std::stod(s.substr(p, e - p));
-    return true;
-}
-
-static bool extract_named_double(const std::string& s, const std::string& section, const std::string& key, double& value) {
-    size_t sec = s.find(section);
-    if (sec == std::string::npos) return false;
-    size_t k = s.find(key, sec);
-    if (k == std::string::npos) return false;
-    return extract_double_after(s, k + key.size(), value);
-}
-
-static bool load_homography_json(const std::string& path, HomographyLock& lock) {
-    std::ifstream in(path);
-    if (!in.is_open()) return false;
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    const std::string s = ss.str();
-
-    auto get_int_named = [&](const char* key, int& out_v) -> bool {
-        size_t p = s.find(key);
-        double tmp = 0.0;
-        if (p == std::string::npos) return false;
-        if (!extract_double_after(s, p, tmp)) return false;
-        out_v = static_cast<int>(std::lround(tmp));
-        return true;
-    };
-
-    int src_w = 0, src_h = 0, tag_w = 0, tag_h = 0, w = 0, h = 0, id = -1;
-    if (!get_int_named("\"warp_width\"", w)) return false;
-    if (!get_int_named("\"warp_height\"", h)) return false;
-    if (!get_int_named("\"id\"", id)) return false;
-    get_int_named("\"source_width\"", src_w);
-    get_int_named("\"source_height\"", src_h);
-    get_int_named("\"tag_rect_width\"", tag_w);
-    get_int_named("\"tag_rect_height\"", tag_h);
-
-    size_t pf = s.find("\"family\"");
-    std::string family;
-    if (pf != std::string::npos) {
-        size_t colon = s.find(':', pf);
-        size_t q1 = (colon == std::string::npos) ? std::string::npos : s.find('"', colon + 1);
-        size_t q2 = (q1 == std::string::npos) ? std::string::npos : s.find('"', q1 + 1);
-        if (q1 != std::string::npos && q2 != std::string::npos) family = s.substr(q1 + 1, q2 - q1 - 1);
-    }
-
-    std::vector<double> vals;
-    vals.reserve(9);
-    size_t p = s.find("\"H\"");
-    if (p == std::string::npos) return false;
-    for (; p < s.size() && vals.size() < 9; ++p) {
-        if (std::isdigit(static_cast<unsigned char>(s[p])) || s[p] == '-' || s[p] == '.') {
-            size_t e = p + 1;
-            while (e < s.size() && (std::isdigit(static_cast<unsigned char>(s[e])) || s[e] == '.' || s[e] == '-' || s[e] == 'e' || s[e] == 'E' || s[e] == '+')) ++e;
-            vals.push_back(std::stod(s.substr(p, e - p)));
-            p = e - 1;
-        }
-    }
-    if (vals.size() != 9) return false;
-
-    cv::Mat H(3, 3, CV_64F);
-    for (int i = 0; i < 9; ++i) H.at<double>(i / 3, i % 3) = vals[i];
-    lock.valid = true;
-    lock.family = family;
-    lock.id = id;
-    lock.source_size = cv::Size(src_w, src_h);
-    lock.tag_rect_size = cv::Size(tag_w, tag_h);
-    lock.warp_size = cv::Size(w, h);
-    lock.H = H.clone();
-    lock.Hinv = H.inv();
-    return true;
-}
-
-static bool load_rois_json(const std::string& path, RoiSet& rois) {
-    std::ifstream in(path);
-    if (!in.is_open()) return false;
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    const std::string s = ss.str();
-
-    RoiSet tmp = rois;
-    if (!extract_named_double(s, "\"red_roi\"", "\"x\"", tmp.red_roi.x)) return false;
-    if (!extract_named_double(s, "\"red_roi\"", "\"y\"", tmp.red_roi.y)) return false;
-    if (!extract_named_double(s, "\"red_roi\"", "\"w\"", tmp.red_roi.w)) return false;
-    if (!extract_named_double(s, "\"red_roi\"", "\"h\"", tmp.red_roi.h)) return false;
-    if (!extract_named_double(s, "\"image_roi\"", "\"x\"", tmp.image_roi.x)) return false;
-    if (!extract_named_double(s, "\"image_roi\"", "\"y\"", tmp.image_roi.y)) return false;
-    if (!extract_named_double(s, "\"image_roi\"", "\"w\"", tmp.image_roi.w)) return false;
-    if (!extract_named_double(s, "\"image_roi\"", "\"h\"", tmp.image_roi.h)) return false;
-
-    if (!clamp_and_validate_roi(tmp.red_roi)) return false;
-    if (!clamp_and_validate_roi(tmp.image_roi)) return false;
+    RoiConfig tmp = rois;
+    auto rr = fs["red_roi"]; auto ir = fs["image_roi"];
+    if (rr.empty() || ir.empty()) return false;
+    rr["x"] >> tmp.red_roi.x; rr["y"] >> tmp.red_roi.y; rr["w"] >> tmp.red_roi.w; rr["h"] >> tmp.red_roi.h;
+    ir["x"] >> tmp.image_roi.x; ir["y"] >> tmp.image_roi.y; ir["w"] >> tmp.image_roi.w; ir["h"] >> tmp.image_roi.h;
+    if (!validate_roi(tmp.red_roi) || !validate_roi(tmp.image_roi)) return false;
     rois = tmp;
     return true;
+}
+
+static inline bool save_warp_package(const std::string& path, const WarpPackage& pack) {
+    if (!pack.valid) return false;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    cv::FileStorage fs(path, cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
+    if (!fs.isOpened()) return false;
+    fs << "valid" << 1;
+    fs << "family" << pack.family;
+    fs << "id" << pack.id;
+    fs << "src_w" << pack.src_w << "src_h" << pack.src_h;
+    fs << "warp_w" << pack.warp_w << "warp_h" << pack.warp_h;
+    fs << "soft_limit" << pack.soft_limit;
+    fs << "H" << pack.H;
+    fs << "Hinv" << pack.Hinv;
+    fs << "map1" << pack.map1;
+    fs << "map2" << pack.map2;
+    fs << "valid_mask" << pack.valid_mask;
+    return true;
+}
+
+static inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
+    cv::FileStorage fs(path, cv::FileStorage::READ);
+    if (!fs.isOpened()) return false;
+    int valid = 0;
+    fs["valid"] >> valid;
+    if (!valid) return false;
+    pack = {};
+    pack.valid = true;
+    fs["family"] >> pack.family;
+    fs["id"] >> pack.id;
+    fs["src_w"] >> pack.src_w; fs["src_h"] >> pack.src_h;
+    fs["warp_w"] >> pack.warp_w; fs["warp_h"] >> pack.warp_h;
+    fs["soft_limit"] >> pack.soft_limit;
+    fs["H"] >> pack.H; fs["Hinv"] >> pack.Hinv;
+    fs["map1"] >> pack.map1; fs["map2"] >> pack.map2;
+    fs["valid_mask"] >> pack.valid_mask;
+    return pack.valid && !pack.map1.empty() && !pack.map2.empty() && !pack.valid_mask.empty();
+}
+
+static inline void nudge_roi(RoiRatio& r, char key, double move_step, double size_step) {
+    if (key == 'a') r.x -= move_step;
+    if (key == 'd') r.x += move_step;
+    if (key == 'w') r.y -= move_step;
+    if (key == 's') r.y += move_step;
+    if (key == 'j') r.w = std::max(0.01, r.w - size_step);
+    if (key == 'l') r.w = std::min(1.00, r.w + size_step);
+    if (key == 'i') r.h = std::max(0.01, r.h - size_step);
+    if (key == 'k') r.h = std::min(1.00, r.h + size_step);
+    validate_roi(r);
 }
 
 } // namespace vision_app
