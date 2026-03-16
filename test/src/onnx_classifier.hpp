@@ -2,10 +2,19 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/core.hpp>
@@ -14,11 +23,97 @@
 #include "classifier_common.hpp"
 
 namespace portable_cls {
+namespace detail {
+
+class ScopedStderrSilencer {
+public:
+    explicit ScopedStderrSilencer(bool enabled = true) : enabled_(enabled) {
+        if (!enabled_) return;
+        std::fflush(stderr);
+#if defined(_WIN32)
+        const int stderr_fd = _fileno(stderr);
+        if (stderr_fd < 0) return;
+        saved_fd_ = _dup(stderr_fd);
+        if (saved_fd_ < 0) return;
+        null_fd_ = _open("NUL", _O_WRONLY);
+        if (null_fd_ < 0) return;
+        if (_dup2(null_fd_, stderr_fd) < 0) {
+            cleanup_no_restore();
+            return;
+        }
+        active_ = true;
+#else
+        saved_fd_ = ::dup(STDERR_FILENO);
+        if (saved_fd_ < 0) return;
+        null_fd_ = ::open("/dev/null", O_WRONLY);
+        if (null_fd_ < 0) return;
+        if (::dup2(null_fd_, STDERR_FILENO) < 0) {
+            cleanup_no_restore();
+            return;
+        }
+        active_ = true;
+#endif
+    }
+
+    ~ScopedStderrSilencer() {
+        restore();
+    }
+
+    ScopedStderrSilencer(const ScopedStderrSilencer&) = delete;
+    ScopedStderrSilencer& operator=(const ScopedStderrSilencer&) = delete;
+
+private:
+    void restore() {
+        if (!active_) {
+            cleanup_no_restore();
+            return;
+        }
+        std::fflush(stderr);
+#if defined(_WIN32)
+        const int stderr_fd = _fileno(stderr);
+        if (stderr_fd >= 0 && saved_fd_ >= 0) {
+            _dup2(saved_fd_, stderr_fd);
+        }
+        if (saved_fd_ >= 0) _close(saved_fd_);
+        if (null_fd_ >= 0) _close(null_fd_);
+#else
+        if (saved_fd_ >= 0) {
+            ::dup2(saved_fd_, STDERR_FILENO);
+        }
+        if (saved_fd_ >= 0) ::close(saved_fd_);
+        if (null_fd_ >= 0) ::close(null_fd_);
+#endif
+        saved_fd_ = -1;
+        null_fd_ = -1;
+        active_ = false;
+    }
+
+    void cleanup_no_restore() {
+#if defined(_WIN32)
+        if (saved_fd_ >= 0) _close(saved_fd_);
+        if (null_fd_ >= 0) _close(null_fd_);
+#else
+        if (saved_fd_ >= 0) ::close(saved_fd_);
+        if (null_fd_ >= 0) ::close(null_fd_);
+#endif
+        saved_fd_ = -1;
+        null_fd_ = -1;
+        active_ = false;
+    }
+
+    bool enabled_ = true;
+    bool active_ = false;
+    int saved_fd_ = -1;
+    int null_fd_ = -1;
+};
+
+}  // namespace detail
 
 class OnnxClassifier {
 public:
     struct Config : public CommonConfig {
-        bool enable_cuda = false;  // requires ORT built with CUDA EP
+        bool enable_cuda = false;              // requires ORT built with CUDA EP
+        bool suppress_stderr_on_load = true;   // hide duplicate-schema spam during ORT init/session load
     };
 
     bool load(const fs::path& model_path,
@@ -31,18 +126,22 @@ public:
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         session_options_.SetIntraOpNumThreads(std::max(1, cfg_.num_threads));
         session_options_.SetInterOpNumThreads(1);
-
 #if defined(ORT_API_VERSION) && ORT_API_VERSION >= 8
         session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 #endif
 
         const std::string model_string = model_path.string();
+
+        {
+            detail::ScopedStderrSilencer silencer(cfg_.suppress_stderr_on_load);
+            env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "portable_cls");
 #if defined(_WIN32)
-        const std::wstring model_w = fs::path(model_path).wstring();
-        session_ = std::make_unique<Ort::Session>(env_, model_w.c_str(), session_options_);
+            const std::wstring model_w = fs::path(model_path).wstring();
+            session_ = std::make_unique<Ort::Session>(*env_, model_w.c_str(), session_options_);
 #else
-        session_ = std::make_unique<Ort::Session>(env_, model_string.c_str(), session_options_);
+            session_ = std::make_unique<Ort::Session>(*env_, model_string.c_str(), session_options_);
 #endif
+        }
 
         Ort::AllocatorWithDefaultOptions allocator;
         input_names_.clear();
@@ -69,12 +168,13 @@ public:
 
         const auto input_type_info = session_->GetInputTypeInfo(0);
         const auto tensor_info = input_type_info.GetTensorTypeAndShapeInfo();
-        const auto shape = tensor_info.GetShape();
+        auto shape = tensor_info.GetShape();
         if (shape.size() != 4) {
-            throw std::runtime_error("Expected ONNX classifier input shape rank 4, got rank " + std::to_string(shape.size()));
+            throw std::runtime_error(
+                "Expected ONNX classifier input shape rank 4, got rank " + std::to_string(shape.size()));
         }
 
-        input_shape_ = shape;
+        input_shape_ = std::move(shape);
         if (input_shape_[0] < 1) input_shape_[0] = 1;
         if (input_shape_[1] < 1) input_shape_[1] = 3;
         if (input_shape_[2] < 1) input_shape_[2] = cfg_.input_height;
@@ -82,7 +182,6 @@ public:
 
         return true;
     }
-
 
     bool load(const fs::path& model_path,
               const fs::path& labels_path) {
@@ -166,7 +265,7 @@ private:
         return chw;
     }
 
-    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "portable_cls"};
+    std::unique_ptr<Ort::Env> env_;
     Ort::SessionOptions session_options_;
     std::unique_ptr<Ort::Session> session_;
     std::vector<int64_t> input_shape_;
