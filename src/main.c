@@ -65,13 +65,18 @@ static bool load_config_file(const std::string& path,
         else if (key == "duration_sec") cam.duration_sec = std::stoi(val);
         else if (key == "preview") cam.preview = parse_bool(val);
         else if (key == "headless") cam.headless = parse_bool(val);
-        else if (key == "tag_family") tag.family = normalize_tag_family(val);
+        else if (key == "tag_family") tag.family = val;
         else if (key == "target_id") tag.target_id = std::stoi(val);
         else if (key == "require_target_id") tag.require_target_id = parse_bool(val);
+        else if (key == "manual_lock_only") tag.manual_lock_only = parse_bool(val);
         else if (key == "lock_frames") tag.lock_frames = std::stoi(val);
         else if (key == "max_center_jitter_px") tag.max_center_jitter_px = std::stod(val);
         else if (key == "max_corner_jitter_px") tag.max_corner_jitter_px = std::stod(val);
         else if (key == "min_quad_area_ratio") tag.min_quad_area_ratio = std::stod(val);
+        else if (key == "threads") tag.threads = std::stoi(val);
+        else if (key == "decimate") tag.decimate = std::stof(val);
+        else if (key == "blur_sigma") tag.blur_sigma = std::stof(val);
+        else if (key == "refine_edges") tag.refine_edges = parse_bool(val);
         else if (key == "warp_width") dep.warp_width = std::stoi(val);
         else if (key == "warp_height") dep.warp_height = std::stoi(val);
         else if (key == "save_probe_csv") dep.save_probe_csv = val;
@@ -83,87 +88,146 @@ static bool load_config_file(const std::string& path,
         else if (key == "load_rois_path") dep.load_rois_path = val;
         else if (key == "auto_load_h") dep.auto_load_h = parse_bool(val);
         else if (key == "auto_load_rois") dep.auto_load_rois = parse_bool(val);
+        else if (key == "auto_save_lock") dep.auto_save_lock = parse_bool(val);
+        else if (key == "live_preview_raw") dep.live_preview_raw = parse_bool(val);
+        else if (key == "live_preview_warp") dep.live_preview_warp = parse_bool(val);
+        else if (key == "show_roi_crops") dep.show_roi_crops = parse_bool(val);
+        else if (key == "show_help_overlay") dep.show_help_overlay = parse_bool(val);
+        else if (key == "show_status_overlay") dep.show_status_overlay = parse_bool(val);
+        else if (key == "save_snapshots") dep.save_snapshots = parse_bool(val);
+        else if (key == "snapshot_dir") dep.snapshot_dir = val;
+        else if (key == "move_step") dep.move_step = std::stod(val);
+        else if (key == "size_step") dep.size_step = std::stod(val);
         else if (key == "red_roi") parse_roi_ratio_arg(val, rois.red_roi);
         else if (key == "image_roi") parse_roi_ratio_arg(val, rois.image_roi);
     }
     return true;
 }
 
-static void print_help() {
+static void print_general_help() {
     std::cout
         << "vision_app (5-module layout: camera / calibrate / stats / deploy / main)\n\n"
-        << "Modes:\n"
-        << "  --mode probe    Enumerate camera formats/resolutions via v4l2-ctl and write\n"
-        << "                  a CSV summary. Useful for picking --fourcc / --width / --fps.\n"
-        << "  --mode bench    Timed capture benchmark: opens the camera, grabs frames for\n"
-        << "                  --duration seconds, then prints FPS / latency statistics and\n"
-        << "                  appends one row to the test CSV. No AprilTag detection runs.\n"
-        << "                  Use --headless 1 for a clean server-side run, or\n"
-        << "                  --preview 1 to watch the stream while benchmarking.\n"
-        << "  --mode live     Live AprilTag detect -> auto-lock -> stable warp preview ->\n"
-        << "                  interactive ROI edit. A warp preview is shown continuously\n"
-        << "                  even before the tag locks so you can frame the shot. Once\n"
-        << "                  the tag is stable for --lock-frames frames the homography\n"
-        << "                  locks. Drag ROI boxes with the mouse or nudge with keys.\n"
-        << "  --mode deploy   Load a previously saved homography + ROIs and run the warp\n"
-        << "                  directly without any tag detection.\n\n"
-        << "Camera arguments:\n"
-        << "  --device /dev/video0         V4L2 device path\n"
-        << "  --width  1280                Requested frame width  (camera may round)\n"
-        << "  --height 720                 Requested frame height (camera may round)\n"
-        << "  --fps    30                  Requested capture frame rate\n"
-        << "  --fourcc MJPG               Four-character pixel format (MJPG, YUYV, …)\n"
-        << "  --buffer-size 1             V4L2 kernel buffer count (1 = minimal latency)\n"
-        << "  --latest-only 1             Drain stale frames before decode (recommended)\n"
-        << "  --drain-grabs 2             Extra grab() calls to discard buffered frames\n"
-        << "  --warmup 8                  Frames to discard at startup before measuring\n"
-        << "  --duration 10               Seconds to run bench/live (0 = run until 'q')\n"
-        << "  --headless 0                Set 1 to disable all OpenCV windows\n"
-        << "  --preview  1                Set 0 to suppress the raw-camera preview window\n\n"
-        << "AprilTag arguments:\n"
-        << "  --tag-family <family>        Tag family to detect. Supported values:\n"
-        << "                                 auto      – try all families, pick largest hit\n"
-        << "                                 36 / tag36h11  – Tag36h11 (default, most robust)\n"
-        << "                                 25 / tag25h9   – Tag25h9  (smaller payload)\n"
-        << "                                 16 / tag16h5   – Tag16h5  (fewest bits, fastest)\n"
-        << "                                 36h10 / tag36h10 – Tag36h10 (legacy)\n"
-        << "                               Short forms (16, 25, 36) are normalised automatically.\n"
-        << "  --target-id 0               Marker ID to track (-1 = any ID, if require-target-id=0)\n"
-        << "  --require-target-id 1       Reject detections whose ID != target-id\n"
-        << "  --lock-frames 8             Consecutive stable frames needed to confirm a lock\n"
-        << "  --max-center-jitter 3.0     Max center-point drift (px) across lock-frames window\n"
-        << "  --max-corner-jitter 4.0     Max per-corner drift (px) across lock-frames window\n"
-        << "  --min-quad-area-ratio 0.0025 Tag must cover at least this fraction of frame area\n\n"
-        << "Warp/ROI/report arguments:\n"
-        << "  --warp-width  1280  --warp-height 720\n"
-        << "                              Output resolution of the warped (perspective-corrected)\n"
-        << "                              image. ROI ratios are expressed in this coordinate space.\n"
-        << "  --red-roi   x,y,w,h         Red ROI as normalised ratios in [0,1] (default: 0.05,0.10,0.20,0.20)\n"
-        << "  --image-roi x,y,w,h         Image ROI as normalised ratios in [0,1] (default: 0.30,0.10,0.50,0.60)\n"
-        << "  --save-h    ../report/warp_h.json    Path to write homography JSON\n"
-        << "  --load-h    ../report/warp_h.json    Path to read  homography JSON (enables auto-load)\n"
-        << "  --save-rois ../report/rois.json      Path to write ROI JSON\n"
-        << "  --load-rois ../report/rois.json      Path to read  ROI JSON (enables auto-load)\n"
-        << "  --save-probe-csv  ../report/probe_table.csv\n"
-        << "  --save-test-csv   ../report/test_results.csv\n"
-        << "  --save-report-md  ../report/latest_report.md\n"
-        << "  --save-snapshots 1          Enable warped-frame snapshot capture (key: c)\n"
-        << "  --snapshot-dir   ../report  Directory for snapshot PNGs\n"
-        << "  --config ../vision_app.conf Load settings from a .conf file (key=value format)\n\n"
-        << "Examples:\n"
-        << "  # List available camera modes\n"
-        << "  ./vision_app --mode probe\n\n"
-        << "  # Benchmark at 1080p MJPG for 15 s, no display\n"
-        << "  ./vision_app --mode bench --width 1920 --height 1080 --fps 30 --fourcc MJPG \\\n"
-        << "               --duration 15 --headless 1\n\n"
-        << "  # Live mode: auto-detect any AprilTag family, warp to 1280x720\n"
-        << "  ./vision_app --mode live --tag-family auto --warp-width 1280 --warp-height 720\n\n"
-        << "  # Live mode: look for Tag25h9 marker ID 3, tighter jitter thresholds\n"
-        << "  ./vision_app --mode live --tag-family 25 --target-id 3 \\\n"
-        << "               --max-center-jitter 2.0 --max-corner-jitter 3.0\n\n"
-        << "  # Deploy (no detection): load saved homography and ROIs\n"
-        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json \\\n"
-        << "               --load-rois ../report/rois.json\n";
+        << "Accepted modes:\n"
+        << "  --mode probe\n"
+        << "  --mode bench\n"
+        << "  --mode live\n"
+        << "  --mode deploy\n\n"
+        << "General arguments:\n"
+        << "  --config PATH                Load config file first\n"
+        << "  --help-mode probe|bench|live|deploy\n"
+        << "  --tag-family auto|16|25|36  AprilTag family search mode\n"
+        << "\nExamples:\n"
+        << "  ./vision_app --mode probe\n"
+        << "  ./vision_app --help-mode live\n"
+        << "  ./vision_app --mode live --tag-family auto --target-id 0\n\n";
+}
+
+static void print_probe_help() {
+    std::cout
+        << "Mode: probe\n"
+        << "Purpose:\n"
+        << "  Query v4l2-ctl, normalize camera modes, print a compact table, and save probe_table.csv.\n\n"
+        << "Most useful arguments:\n"
+        << "  --device /dev/video0        Camera node to inspect\n"
+        << "  --save-probe-csv PATH       Where to write normalized probe results\n\n"
+        << "Example:\n"
+        << "  ./vision_app --mode probe --device /dev/video0 --save-probe-csv ../report/probe_table.csv\n\n";
+}
+
+static void print_bench_help() {
+    std::cout
+        << "Mode: bench\n"
+        << "Purpose:\n"
+        << "  Open one specific camera configuration and measure true capture behavior.\n"
+        << "  Use this to choose the mode you will later use for AprilTag locking and warp.\n\n"
+        << "Important arguments:\n"
+        << "  --device /dev/video0        Camera node\n"
+        << "  --width N --height N        Requested capture size\n"
+        << "  --fps N                     Requested camera fps\n"
+        << "  --fourcc MJPG|YUYV          Requested pixel format\n"
+        << "  --buffer-size N             OpenCV/V4L2 requested queue depth; 1 favors freshness\n"
+        << "  --latest-only 0|1           When 1, favor the newest frame instead of old queued frames\n"
+        << "  --drain-grabs N             Extra grab calls before retrieve; helps drop stale frames\n"
+        << "  --warmup N                  Frames to discard right after opening\n"
+        << "  --duration N                Benchmark duration in seconds\n"
+        << "  --headless 0|1              Disable preview window when benchmarking\n"
+        << "  --save-test-csv PATH        Append one result row for this run\n\n"
+        << "Good start:\n"
+        << "  ./vision_app --mode bench --width 1280 --height 720 --fps 30 --fourcc MJPG --latest-only 1 --drain-grabs 2 --headless 1 --duration 10\n\n";
+}
+
+static void print_live_help() {
+    std::cout
+        << "Mode: live\n"
+        << "Purpose:\n"
+        << "  Search for an AprilTag, show family/id live, lock the tag, compute homography from the\n"
+        << "  tag quadrilateral itself, warp the full frame, and let you edit ratio-based rois.\n\n"
+        << "Important camera arguments:\n"
+        << "  --device /dev/video0\n"
+        << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
+        << "  --latest-only 0|1 --drain-grabs N --buffer-size N\n\n"
+        << "Important tag arguments:\n"
+        << "  --tag-family auto|16|25|36  auto tries 36 -> 25 -> 16 and uses the best visible match\n"
+        << "  --target-id N               Desired tag id\n"
+        << "  --require-target-id 0|1     When 1, ignore tags with different ids\n"
+        << "  --manual-lock-only 0|1      When 1, never auto-lock; you press space/enter to lock\n"
+        << "  --lock-frames N             Stable frames required before auto-lock\n"
+        << "  --max-center-jitter X       Allowed center motion during locking\n"
+        << "  --max-corner-jitter X       Allowed corner motion during locking\n"
+        << "  --min-quad-area-ratio X     Minimum visible tag area ratio before lock is allowed\n\n"
+        << "Warp and ROI arguments:\n"
+        << "  --warp-width N --warp-height N\n"
+        << "  --red-roi x,y,w,h           Ratio roi in warped coordinates\n"
+        << "  --image-roi x,y,w,h         Ratio roi in warped coordinates\n"
+        << "  --move-step X               Keyboard move step for roi editing\n"
+        << "  --size-step X               Keyboard size step for roi editing\n"
+        << "  --auto-save-lock 0|1        Save H/rois immediately after locking\n"
+        << "  --save-h PATH --save-rois PATH --save-report-md PATH\n\n"
+        << "Preview arguments:\n"
+        << "  --live-preview-raw 0|1\n"
+        << "  --live-preview-warp 0|1\n"
+        << "  --show-roi-crops 0|1\n"
+        << "  --show-help-overlay 0|1\n"
+        << "  --save-snapshots 0|1 --snapshot-dir PATH\n\n"
+        << "Interaction:\n"
+        << "  q/ESC quit | space/enter lock | u unlock | p save all | y save H | o save rois\n"
+        << "  1/2 or TAB select roi | wasd move | ijkl resize | z/x move step | n/m size step\n"
+        << "  h toggle help overlay | t toggle auto-save | r reset rois | c save warped snapshot\n\n"
+        << "Good start:\n"
+        << "  ./vision_app --mode live --tag-family auto --target-id 0 --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
+}
+
+static void print_deploy_help() {
+    std::cout
+        << "Mode: deploy\n"
+        << "Purpose:\n"
+        << "  Load a saved homography and saved rois, skip acquisition, and immediately run the full-frame warp.\n"
+        << "  Use this after calibration when the camera and plane geometry stay fixed.\n\n"
+        << "Important arguments:\n"
+        << "  --load-h PATH               Saved homography json from live mode\n"
+        << "  --load-rois PATH            Saved roi json from live mode\n"
+        << "  --device /dev/video0\n"
+        << "  --width N --height N --fps N --fourcc MJPG|YUYV\n"
+        << "  --latest-only 0|1 --drain-grabs N\n"
+        << "  --live-preview-raw 0|1 --live-preview-warp 0|1\n"
+        << "  --show-roi-crops 0|1\n\n"
+        << "Example:\n"
+        << "  ./vision_app --mode deploy --load-h ../report/warp_h.json --load-rois ../report/rois.json --width 1280 --height 720 --fps 30 --fourcc MJPG\n\n";
+}
+
+static void print_help_mode(const std::string& mode) {
+    const std::string m = trim(mode);
+    if (m == "probe") print_probe_help();
+    else if (m == "bench") print_bench_help();
+    else if (m == "live") print_live_help();
+    else if (m == "deploy") print_deploy_help();
+    else {
+        print_general_help();
+        print_probe_help();
+        print_bench_help();
+        print_live_help();
+        print_deploy_help();
+    }
 }
 
 } // namespace
@@ -189,7 +253,10 @@ int main(int argc, char** argv) {
 
         try {
             if (a == "-h" || a == "--help") {
-                print_help();
+                print_help_mode("all");
+                return 0;
+            } else if (a == "--help-mode") {
+                print_help_mode(need("--help-mode"));
                 return 0;
             } else if (a == "--config") {
                 config_path = need("--config");
@@ -207,13 +274,18 @@ int main(int argc, char** argv) {
             else if (a == "--duration") cam.duration_sec = std::stoi(need("--duration"));
             else if (a == "--preview") cam.preview = parse_bool(need("--preview"));
             else if (a == "--headless") { cam.headless = parse_bool(need("--headless")); if (cam.headless) cam.preview = false; }
-            else if (a == "--tag-family") tag.family = normalize_tag_family(need("--tag-family"));
+            else if (a == "--tag-family") tag.family = need("--tag-family");
             else if (a == "--target-id") tag.target_id = std::stoi(need("--target-id"));
             else if (a == "--require-target-id") tag.require_target_id = parse_bool(need("--require-target-id"));
+            else if (a == "--manual-lock-only") tag.manual_lock_only = parse_bool(need("--manual-lock-only"));
             else if (a == "--lock-frames") tag.lock_frames = std::stoi(need("--lock-frames"));
             else if (a == "--max-center-jitter") tag.max_center_jitter_px = std::stod(need("--max-center-jitter"));
             else if (a == "--max-corner-jitter") tag.max_corner_jitter_px = std::stod(need("--max-corner-jitter"));
             else if (a == "--min-quad-area-ratio") tag.min_quad_area_ratio = std::stod(need("--min-quad-area-ratio"));
+            else if (a == "--threads") tag.threads = std::stoi(need("--threads"));
+            else if (a == "--decimate") tag.decimate = std::stof(need("--decimate"));
+            else if (a == "--blur-sigma") tag.blur_sigma = std::stof(need("--blur-sigma"));
+            else if (a == "--refine-edges") tag.refine_edges = parse_bool(need("--refine-edges"));
             else if (a == "--warp-width") dep.warp_width = std::stoi(need("--warp-width"));
             else if (a == "--warp-height") dep.warp_height = std::stoi(need("--warp-height"));
             else if (a == "--red-roi") { if (!parse_roi_ratio_arg(need("--red-roi"), rois.red_roi)) throw std::runtime_error("bad --red-roi"); }
@@ -225,14 +297,20 @@ int main(int argc, char** argv) {
             else if (a == "--save-probe-csv") dep.save_probe_csv = need("--save-probe-csv");
             else if (a == "--save-test-csv") dep.save_test_csv = need("--save-test-csv");
             else if (a == "--save-report-md") dep.save_report_md = need("--save-report-md");
+            else if (a == "--auto-save-lock") dep.auto_save_lock = parse_bool(need("--auto-save-lock"));
+            else if (a == "--live-preview-raw") dep.live_preview_raw = parse_bool(need("--live-preview-raw"));
+            else if (a == "--live-preview-warp") dep.live_preview_warp = parse_bool(need("--live-preview-warp"));
+            else if (a == "--show-roi-crops") dep.show_roi_crops = parse_bool(need("--show-roi-crops"));
+            else if (a == "--show-help-overlay") dep.show_help_overlay = parse_bool(need("--show-help-overlay"));
+            else if (a == "--show-status-overlay") dep.show_status_overlay = parse_bool(need("--show-status-overlay"));
             else if (a == "--save-snapshots") dep.save_snapshots = parse_bool(need("--save-snapshots"));
             else if (a == "--snapshot-dir") dep.snapshot_dir = need("--snapshot-dir");
-            else {
-                throw std::runtime_error("unknown argument: " + a);
-            }
+            else if (a == "--move-step") dep.move_step = std::stod(need("--move-step"));
+            else if (a == "--size-step") dep.size_step = std::stod(need("--size-step"));
+            else throw std::runtime_error("unknown argument: " + a);
         } catch (const std::exception& e) {
             std::cerr << "Argument error: " << e.what() << "\n\n";
-            print_help();
+            print_help_mode(dep.mode);
             return 1;
         }
     }
@@ -269,14 +347,12 @@ int main(int argc, char** argv) {
             std::cerr << "Run failed: " << err << "\n";
             return 1;
         }
-        if (lock.valid) {
-            std::cout << "Saved homography: " << dep.save_h_path << "\n";
-        }
+        if (lock.valid) std::cout << "Saved homography: " << dep.save_h_path << "\n";
         std::cout << "Saved ROIs/report: " << dep.save_rois_path << ", " << dep.save_report_md << "\n";
         return 0;
     }
 
     std::cerr << "Unknown mode: " << dep.mode << "\n";
-    print_help();
+    print_help_mode("all");
     return 1;
 }

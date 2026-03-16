@@ -2,9 +2,13 @@
 
 #include <chrono>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include "camera.hpp"
@@ -33,8 +37,14 @@ struct DeployConfig {
 
     bool live_preview_raw = true;
     bool live_preview_warp = true;
+    bool show_roi_crops = true;
+    bool show_help_overlay = true;
+    bool show_status_overlay = true;
     bool save_snapshots = false;
     std::string snapshot_dir = "../report";
+
+    double move_step = 0.005;
+    double size_step = 0.005;
 };
 
 static void nudge_ratio(RoiRatio& roi, char key, double move_step, double size_step) {
@@ -50,25 +60,97 @@ static void nudge_ratio(RoiRatio& roi, char key, double move_step, double size_s
 }
 
 static void print_live_keys() {
-    std::cout << "\nLive mode keys:\n"
-              << "  q / ESC   : quit\n"
-              << "  p         : save homography + rois\n"
-              << "  u         : unlock / reacquire tag\n"
-              << "  1         : select red_roi  (for keyboard nudge)\n"
-              << "  2         : select image_roi (for keyboard nudge)\n"
-              << "  w a s d   : move selected roi (0.5 % per key press)\n"
-              << "  i j k l   : resize selected roi height/width (0.5 % per key press)\n"
-              << "  r         : reset rois to defaults\n"
-              << "  c         : capture warped snapshot\n"
-              << "\nMouse (in warp-preview window):\n"
-              << "  LMB drag  : move red_roi or image_roi\n"
-              << "  RMB drag  : resize (bottom-right corner) of red_roi or image_roi\n"
-              << "\nWorkflow:\n"
-              << "  - Before lock: raw view + live warp preview are shown continuously.\n"
-              << "  - Once the tag is stable for --lock-frames frames the homography\n"
-              << "    locks automatically and the warp freezes.\n"
-              << "  - After lock: drag ROI boxes with the mouse, or nudge with keys.\n"
-              << "  - Press 'p' to save, 'u' to unlock and reacquire.\n\n";
+    std::cout
+        << "\nLive mode keys:\n"
+        << "  q / ESC      quit\n"
+        << "  h            toggle help overlay\n"
+        << "  space/enter  force lock current visible tag\n"
+        << "  u            unlock and reacquire\n"
+        << "  p            save all outputs\n"
+        << "  y            save homography only\n"
+        << "  o            save rois only\n"
+        << "  t            toggle auto-save on lock\n"
+        << "  1 / 2        select red_roi / image_roi\n"
+        << "  TAB          switch selected roi\n"
+        << "  w a s d      move selected roi\n"
+        << "  i / k        shrink / grow roi height\n"
+        << "  j / l        shrink / grow roi width\n"
+        << "  z / x        decrease / increase move step\n"
+        << "  n / m        decrease / increase size step\n"
+        << "  r            reset rois to defaults\n"
+        << "  c            save warped snapshot\n"
+        << std::endl;
+}
+
+static std::string live_phase_string(bool lock_valid, const TagLocker& locker, bool manual_lock_only) {
+    if (lock_valid) return "LOCKED";
+    if (manual_lock_only) return "SEARCHING (manual lock)";
+    if (locker.history_size() > 0) return "LOCKING";
+    return "SEARCHING";
+}
+
+static void draw_live_hud(cv::Mat& raw_view,
+                          cv::Mat* warped_view,
+                          const AprilTagConfig& tag_cfg,
+                          const TagLocker& locker,
+                          const AprilTagDetection& det,
+                          const HomographyLock& lock,
+                          char selected_roi,
+                          bool show_help_overlay,
+                          bool auto_save_lock,
+                          double move_step,
+                          double size_step) {
+    const std::string phase = live_phase_string(lock.valid, locker, tag_cfg.manual_lock_only);
+    std::ostringstream line1;
+    line1 << "phase=" << phase << "  family_req=" << normalize_family_token(tag_cfg.family)
+          << "  target_id=" << (tag_cfg.require_target_id ? std::to_string(tag_cfg.target_id) : std::string("any"));
+    cv::putText(raw_view, line1.str(), {20, 60}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
+
+    std::ostringstream line2;
+    line2 << "selected_roi=" << (selected_roi == '1' ? "red_roi" : "image_roi")
+          << "  move_step=" << std::fixed << std::setprecision(4) << move_step
+          << "  size_step=" << size_step
+          << "  auto_save=" << (auto_save_lock ? "on" : "off");
+    cv::putText(raw_view, line2.str(), {20, 84}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
+
+    if (det.found && !lock.valid) {
+        std::ostringstream line3;
+        line3 << "candidate=" << det.family << " id=" << det.id << "  hist=" << locker.history_size() << '/' << tag_cfg.lock_frames;
+        cv::putText(raw_view, line3.str(), {20, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {0,255,255}, 2);
+    }
+
+    if (show_help_overlay) {
+        const std::vector<std::string> lines = {
+            "space/enter lock  u unlock  p save all  y save H  o save rois",
+            "1/2 or TAB select roi  wasd move  ijkl resize  z/x move step  n/m size step",
+            std::string("family=") + normalize_family_token(tag_cfg.family) + "  options: auto|16|25|36"
+        };
+        int y = raw_view.rows - 60;
+        for (const auto& line : lines) {
+            cv::putText(raw_view, line, {20, y}, cv::FONT_HERSHEY_SIMPLEX, 0.48, {220,220,220}, 1);
+            y += 18;
+        }
+    }
+
+    if (warped_view && !warped_view->empty()) {
+        std::ostringstream w1;
+        w1 << (selected_roi == '1' ? "red_roi" : "image_roi") << "  move="
+           << std::fixed << std::setprecision(4) << move_step << " size=" << size_step;
+        cv::putText(*warped_view, w1.str(), {20, warped_view->rows - 22}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255,255,255}, 2);
+    }
+}
+
+static bool save_all_outputs(const DeployConfig& dep_cfg,
+                             const CameraConfig& cam_cfg,
+                             const CaptureStats& capture,
+                             const StageStats& stage,
+                             const HomographyLock* lock,
+                             const RoiSet& rois) {
+    bool ok = true;
+    if (lock && lock->valid) ok = save_homography_json(dep_cfg.save_h_path, *lock) && ok;
+    ok = save_rois_json(dep_cfg.save_rois_path, rois) && ok;
+    ok = write_latest_report_md(dep_cfg.save_report_md, cam_cfg, capture, &stage, (lock && lock->valid) ? lock : nullptr, &rois) && ok;
+    return ok;
 }
 
 static bool run_bench_mode(const CameraConfig& cam_cfg,
@@ -131,12 +213,10 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
     RollingTimer detect_t, warp_t, total_t;
     cv::Mat frame, raw_view, warped, red_crop, image_crop;
     char selected_roi = '1';
-    bool warp_window_created = false;
-    WarpMouseCbData mouse_cb_data;
-    mouse_cb_data.rois         = &rois;
-    mouse_cb_data.warp_size    = cv::Size(dep_cfg.warp_width, dep_cfg.warp_height);
-    mouse_cb_data.lock_valid   = lock.valid; // true if loaded from deploy/auto_load_h
-    mouse_cb_data.selected_roi = &selected_roi;
+    bool show_help_overlay = dep_cfg.show_help_overlay;
+    bool auto_save_lock = dep_cfg.auto_save_lock;
+    double move_step = dep_cfg.move_step;
+    double size_step = dep_cfg.size_step;
     print_live_keys();
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -146,49 +226,28 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
 
         raw_view = frame.clone();
         AprilTagDetection det;
-        bool have_det = false;
 
         if (!lock.valid) {
             const auto td0 = std::chrono::steady_clock::now();
             if (!detect_apriltag_best(frame, tag_cfg, det, err)) return false;
             const double detect_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - td0).count();
             detect_t.push(detect_ms);
-            have_det = det.found;
 
-            const bool got_lock = have_det && locker.update(det, frame.size());
+            const bool allow_auto_lock = !tag_cfg.manual_lock_only;
+            const bool got_lock = det.found && locker.update(det, frame.size(), allow_auto_lock);
             draw_detection_overlay(raw_view, det, got_lock);
             if (got_lock) {
                 if (!compute_homography_from_tag_quad(locker.locked_det(), cv::Size(dep_cfg.warp_width, dep_cfg.warp_height), lock)) {
                     err = "failed to compute homography after tag lock";
                     return false;
                 }
-                mouse_cb_data.lock_valid = true;
-                if (dep_cfg.auto_save_lock) {
+                if (auto_save_lock) {
                     save_homography_json(dep_cfg.save_h_path, lock);
                     save_rois_json(dep_cfg.save_rois_path, rois);
                 }
             }
-
-            // Live warp preview: even before full lock, show what the warp
-            // would look like based on the currently detected tag corners.
-            if (!cam_cfg.headless && dep_cfg.live_preview_warp && have_det && !got_lock) {
-                HomographyLock tmp_lock;
-                if (compute_homography_from_tag_quad(det, cv::Size(dep_cfg.warp_width, dep_cfg.warp_height), tmp_lock)) {
-                    cv::Mat tmp_warped;
-                    if (warp_full_frame(frame, tmp_warped, tmp_lock)) {
-                        draw_roi_overlay(tmp_warped, rois, tmp_lock);
-                        cv::putText(tmp_warped, "Live preview (hold still to lock)",
-                                    {20, 60}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0, 165, 255}, 2);
-                        cv::imshow("vision_app_warp", tmp_warped);
-                        if (!warp_window_created) {
-                            cv::setMouseCallback("vision_app_warp", on_warp_mouse, &mouse_cb_data);
-                            warp_window_created = true;
-                        }
-                    }
-                }
-            }
         } else {
-            cv::putText(raw_view, "Locked", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0,255,0}, 2);
+            cv::putText(raw_view, "Locked deploy/runtime mode", {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, {0,255,0}, 2);
         }
 
         if (lock.valid) {
@@ -199,21 +258,20 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
             }
             const double warp_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw0).count();
             warp_t.push(warp_ms);
-            draw_roi_overlay(warped, rois, lock);
-            red_crop   = crop_roi_clone(warped, rois.red_roi);
-            image_crop = crop_roi_clone(warped, rois.image_roi);
-            if (!red_crop.empty())   cv::imshow("vision_app_red_roi",   red_crop);
-            if (!image_crop.empty()) cv::imshow("vision_app_image_roi", image_crop);
+            draw_roi_overlay(warped, rois, lock, selected_roi);
+            draw_live_hud(raw_view, &warped, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, move_step, size_step);
+            if (dep_cfg.show_roi_crops) {
+                red_crop = crop_roi_clone(warped, rois.red_roi);
+                image_crop = crop_roi_clone(warped, rois.image_roi);
+                if (!red_crop.empty()) cv::imshow("vision_app_red_roi", red_crop);
+                if (!image_crop.empty()) cv::imshow("vision_app_image_roi", image_crop);
+            }
+        } else {
+            draw_live_hud(raw_view, nullptr, tag_cfg, locker, det, lock, selected_roi, show_help_overlay, auto_save_lock, move_step, size_step);
         }
 
-        if (!cam_cfg.headless && dep_cfg.live_preview_raw)                          cv::imshow("vision_app_raw", raw_view);
-        if (!cam_cfg.headless && dep_cfg.live_preview_warp && !warped.empty()) {
-            cv::imshow("vision_app_warp", warped);
-            if (!warp_window_created) {
-                cv::setMouseCallback("vision_app_warp", on_warp_mouse, &mouse_cb_data);
-                warp_window_created = true;
-            }
-        }
+        if (!cam_cfg.headless && dep_cfg.live_preview_raw) cv::imshow("vision_app_raw", raw_view);
+        if (!cam_cfg.headless && dep_cfg.live_preview_warp && !warped.empty()) cv::imshow("vision_app_warp", warped);
 
         const double total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loop_start).count();
         total_t.push(total_ms);
@@ -222,21 +280,57 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
         if (key == 'q' || key == 27) break;
         if (key == '1') selected_roi = '1';
         if (key == '2') selected_roi = '2';
-        if (key == 'u') { lock = {}; locker.reset(); warped.release(); mouse_cb_data.lock_valid = false; }
+        if (key == 9) selected_roi = (selected_roi == '1') ? '2' : '1';
+        if (key == 'h') show_help_overlay = !show_help_overlay;
+        if (key == 't') { auto_save_lock = !auto_save_lock; std::cout << "auto_save_lock=" << (auto_save_lock ? "on" : "off") << "\n"; }
+        if (key == 'u') { lock = {}; locker.reset(); warped.release(); }
         if (key == 'r') { rois = {}; }
         if (key == 'p') {
-            if (lock.valid) save_homography_json(dep_cfg.save_h_path, lock);
+            StageStats stage_preview{};
+            stage_preview.frames = cam.stats().frames;
+            stage_preview.detect_ms_avg = detect_t.avg();
+            stage_preview.warp_ms_avg = warp_t.avg();
+            stage_preview.total_ms_avg = total_t.avg();
+            stage_preview.detect_ms_max = detect_t.max_ms;
+            stage_preview.warp_ms_max = warp_t.max_ms;
+            stage_preview.total_ms_max = total_t.max_ms;
+            stage_preview.detector_fps_avg = (stage_preview.detect_ms_avg > 0.0) ? (1000.0 / stage_preview.detect_ms_avg) : 0.0;
+            save_all_outputs(dep_cfg, cam_cfg, cam.stats(), stage_preview, lock.valid ? &lock : nullptr, rois);
+            std::cout << "Saved all outputs\n";
+        }
+        if (key == 'y' && lock.valid) {
+            save_homography_json(dep_cfg.save_h_path, lock);
+            std::cout << "Saved homography: " << dep_cfg.save_h_path << "\n";
+        }
+        if (key == 'o') {
             save_rois_json(dep_cfg.save_rois_path, rois);
-            std::cout << "Saved: " << dep_cfg.save_h_path << " and " << dep_cfg.save_rois_path << "\n";
+            std::cout << "Saved rois: " << dep_cfg.save_rois_path << "\n";
+        }
+        if ((key == ' ' || key == 13) && !lock.valid) {
+            const AprilTagDetection cand = locker.last_candidate().found ? locker.last_candidate() : det;
+            if (locker.force_lock(cand, frame.size())) {
+                if (!compute_homography_from_tag_quad(locker.locked_det(), cv::Size(dep_cfg.warp_width, dep_cfg.warp_height), lock)) {
+                    err = "failed to compute homography after manual lock";
+                    return false;
+                }
+                if (auto_save_lock) {
+                    save_homography_json(dep_cfg.save_h_path, lock);
+                    save_rois_json(dep_cfg.save_rois_path, rois);
+                }
+            }
         }
         if (key == 'c' && dep_cfg.save_snapshots && !warped.empty()) {
             const std::string path = dep_cfg.snapshot_dir + "/warped_snapshot.png";
             cv::imwrite(path, warped);
             std::cout << "Saved snapshot: " << path << "\n";
         }
+        if (key == 'z') move_step = std::max(0.001, move_step * 0.5);
+        if (key == 'x') move_step = std::min(0.100, move_step * 2.0);
+        if (key == 'n') size_step = std::max(0.001, size_step * 0.5);
+        if (key == 'm') size_step = std::min(0.100, size_step * 2.0);
 
-        if (selected_roi == '1') nudge_ratio(rois.red_roi, static_cast<char>(key), 0.005, 0.005);
-        else if (selected_roi == '2') nudge_ratio(rois.image_roi, static_cast<char>(key), 0.005, 0.005);
+        if (selected_roi == '1') nudge_ratio(rois.red_roi, static_cast<char>(key), move_step, size_step);
+        else if (selected_roi == '2') nudge_ratio(rois.image_roi, static_cast<char>(key), move_step, size_step);
 
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (cam_cfg.duration_sec > 0 && elapsed >= cam_cfg.duration_sec && cam_cfg.headless) break;
@@ -259,10 +353,8 @@ static bool run_live_or_deploy_mode(const CameraConfig& cam_cfg,
     print_capture_stats(cam_cfg, out_capture);
     append_test_csv(dep_cfg.save_test_csv, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr);
     write_latest_report_md(dep_cfg.save_report_md, cam_cfg, out_capture, &out_stage, lock.valid ? &out_lock : nullptr, &rois);
-    if (lock.valid) {
-        save_homography_json(dep_cfg.save_h_path, lock);
-        save_rois_json(dep_cfg.save_rois_path, rois);
-    }
+    if (lock.valid) save_homography_json(dep_cfg.save_h_path, lock);
+    save_rois_json(dep_cfg.save_rois_path, rois);
     return true;
 }
 

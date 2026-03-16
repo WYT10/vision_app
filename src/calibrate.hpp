@@ -25,9 +25,10 @@
 namespace vision_app {
 
 struct AprilTagConfig {
-    std::string family = "tag36h11";
+    std::string family = "auto";          // auto | 16 | 25 | 36 | tag16h5 | tag25h9 | tag36h11
     int target_id = 0;
     bool require_target_id = true;
+    bool manual_lock_only = false;         // when true, only Space/Enter can lock
     int lock_frames = 8;
     double max_center_jitter_px = 3.0;
     double max_corner_jitter_px = 4.0;
@@ -90,11 +91,17 @@ static cv::Rect ratio_to_rect(const RoiRatio& roi, const cv::Size& image_size) {
     int y = static_cast<int>(std::round(r.y * image_size.height));
     int w = std::max(1, static_cast<int>(std::round(r.w * image_size.width)));
     int h = std::max(1, static_cast<int>(std::round(r.h * image_size.height)));
-    x = std::max(0, std::min(x, image_size.width - 1));
-    y = std::max(0, std::min(y, image_size.height - 1));
+    x = std::max(0, std::min(x, std::max(0, image_size.width - 1)));
+    y = std::max(0, std::min(y, std::max(0, image_size.height - 1)));
     if (x + w > image_size.width) w = image_size.width - x;
     if (y + h > image_size.height) h = image_size.height - y;
     return cv::Rect(x, y, std::max(1, w), std::max(1, h));
+}
+
+static cv::Mat crop_roi_clone(const cv::Mat& img, const RoiRatio& roi) {
+    if (img.empty()) return {};
+    const cv::Rect r = ratio_to_rect(roi, img.size());
+    return img(r).clone();
 }
 
 static std::array<cv::Point2f, 4> make_warp_quad(const cv::Size& size) {
@@ -106,23 +113,36 @@ static std::array<cv::Point2f, 4> make_warp_quad(const cv::Size& size) {
     };
 }
 
-// Normalize user-supplied family name.
-// Accepts short forms ("16", "25", "36") and full names ("tag16h5", …).
-// The special value "auto" tries all families and picks the largest detected tag.
-static std::string normalize_tag_family(const std::string& s) {
-    if (s == "auto")                                   return "auto";
-    if (s == "16" || s == "16h5"  || s == "tag16h5")  return "tag16h5";
-    if (s == "25" || s == "25h9"  || s == "tag25h9")  return "tag25h9";
-    if (s == "36h10"              || s == "tag36h10") return "tag36h10";
-    if (s == "36" || s == "36h11" || s == "tag36h11") return "tag36h11";
-    return s; // pass through unknown values as-is
+static std::string normalize_family_token(std::string family) {
+    std::transform(family.begin(), family.end(), family.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    if (family == "tag16h5" || family == "16" || family == "apriltag16" || family == "16h5") return "16";
+    if (family == "tag25h9" || family == "25" || family == "apriltag25" || family == "25h9") return "25";
+    if (family == "tag36h11" || family == "tag36h10" || family == "36" || family == "apriltag36" || family == "36h11" || family == "36h10") return "36";
+    if (family == "auto" || family.empty()) return "auto";
+    return family;
+}
+
+static std::vector<std::string> tag_family_search_order(const std::string& family_token) {
+    const std::string f = normalize_family_token(family_token);
+    if (f == "16") return {"16"};
+    if (f == "25") return {"25"};
+    if (f == "36") return {"36"};
+    return {"36", "25", "16"};
+}
+
+static std::string family_label(const std::string& token) {
+    const std::string f = normalize_family_token(token);
+    if (f == "16") return "tag16h5";
+    if (f == "25") return "tag25h9";
+    if (f == "36") return "tag36h11";
+    return "unknown";
 }
 
 #if VISION_APP_HAS_ARUCO
-static int april_family_to_dict(const std::string& family) {
-    if (family == "tag16h5")  return cv::aruco::DICT_APRILTAG_16h5;
-    if (family == "tag25h9")  return cv::aruco::DICT_APRILTAG_25h9;
-    if (family == "tag36h10") return cv::aruco::DICT_APRILTAG_36h10;
+static int family_token_to_dict(const std::string& token) {
+    const std::string f = normalize_family_token(token);
+    if (f == "16") return cv::aruco::DICT_APRILTAG_16h5;
+    if (f == "25") return cv::aruco::DICT_APRILTAG_25h9;
     return cv::aruco::DICT_APRILTAG_36h11;
 }
 #endif
@@ -137,61 +157,37 @@ static bool detect_apriltag_best(const cv::Mat& bgr_or_gray,
     if (bgr_or_gray.channels() == 1) gray = bgr_or_gray;
     else cv::cvtColor(bgr_or_gray, gray, cv::COLOR_BGR2GRAY);
 
-    // Helper lambda: detect with one specific dictionary and return the best hit.
-    auto detect_with_dict = [&](int dict_id, const std::string& fname) -> AprilTagDetection {
-        AprilTagDetection d;
-        auto dict   = cv::aruco::getPredefinedDictionary(dict_id);
+    auto search_order = tag_family_search_order(cfg.family);
+    double best_score = -1.0;
+
+    for (const auto& fam : search_order) {
+        auto dict = cv::aruco::getPredefinedDictionary(family_token_to_dict(fam));
         auto params = cv::aruco::DetectorParameters();
-#if CV_VERSION_MAJOR >= 4
-        params.cornerRefinementMethod = cfg.refine_edges
-            ? cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
-#endif
+        params.cornerRefinementMethod = cfg.refine_edges ? cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
         params.aprilTagQuadDecimate = cfg.decimate;
-        params.aprilTagQuadSigma    = cfg.blur_sigma;
-        params.useAruco3Detection   = false;
+        params.aprilTagQuadSigma = cfg.blur_sigma;
+        params.useAruco3Detection = false;
 
         cv::aruco::ArucoDetector detector(dict, params);
         std::vector<int> ids;
         std::vector<std::vector<cv::Point2f>> corners;
         detector.detectMarkers(gray, corners, ids);
-        if (ids.empty()) return d;
 
-        int best_i = -1;
-        double best_area = -1.0;
         for (size_t i = 0; i < ids.size(); ++i) {
             if (cfg.require_target_id && ids[i] != cfg.target_id) continue;
             if (corners[i].size() != 4) continue;
             const double area = std::abs(cv::contourArea(corners[i]));
-            if (area > best_area) { best_area = area; best_i = static_cast<int>(i); }
+            const double score = area;
+            if (score <= best_score) continue;
+            best_score = score;
+            out.found = true;
+            out.family = family_label(fam);
+            out.id = ids[i];
+            out.area = area;
+            out.corners = {corners[i][0], corners[i][1], corners[i][2], corners[i][3]};
+            out.center = 0.25f * (corners[i][0] + corners[i][1] + corners[i][2] + corners[i][3]);
         }
-        if (best_i < 0) return d;
-
-        const auto& c = corners[best_i];
-        d.found   = true;
-        d.family  = fname;
-        d.id      = ids[best_i];
-        d.area    = std::abs(cv::contourArea(c));
-        d.corners = {c[0], c[1], c[2], c[3]};
-        d.center  = 0.25f * (c[0] + c[1] + c[2] + c[3]);
-        return d;
-    };
-
-    // "auto": scan all four families; keep the largest-area tag found.
-    if (cfg.family == "auto") {
-        const std::pair<int, const char*> kFamilies[] = {
-            {cv::aruco::DICT_APRILTAG_36h11, "tag36h11"},
-            {cv::aruco::DICT_APRILTAG_25h9,  "tag25h9"},
-            {cv::aruco::DICT_APRILTAG_16h5,  "tag16h5"},
-            {cv::aruco::DICT_APRILTAG_36h10, "tag36h10"},
-        };
-        for (const auto& kv : kFamilies) {
-            AprilTagDetection d = detect_with_dict(kv.first, kv.second);
-            if (d.found && (!out.found || d.area > out.area)) out = d;
-        }
-        return true;
     }
-
-    out = detect_with_dict(april_family_to_dict(cfg.family), cfg.family);
     return true;
 #else
     (void)bgr_or_gray; (void)cfg;
@@ -207,63 +203,75 @@ public:
     void reset() {
         hist_.clear();
         locked_ = {};
+        last_candidate_ = {};
     }
 
-    bool update(const AprilTagDetection& det, const cv::Size& image_size) {
+    bool update(const AprilTagDetection& det, const cv::Size& image_size, bool allow_lock = true) {
+        last_candidate_ = det;
         if (!det.found) {
+            if (!allow_lock) return false;
             reset();
             return false;
         }
 
         const double area_ratio = det.area / std::max(1.0, static_cast<double>(image_size.area()));
         if (area_ratio < cfg_.min_quad_area_ratio) {
+            if (!allow_lock) return false;
             reset();
             return false;
         }
 
         if (!hist_.empty()) {
             if (hist_.back().id != det.id || hist_.back().family != det.family) {
-                reset();
+                hist_.clear();
             }
         }
 
         hist_.push_back(det);
         while (static_cast<int>(hist_.size()) > cfg_.lock_frames) hist_.pop_front();
-        if (static_cast<int>(hist_.size()) < cfg_.lock_frames) return false;
+        if (!allow_lock || static_cast<int>(hist_.size()) < cfg_.lock_frames) return false;
 
         const cv::Point2f ref_center = hist_.front().center;
         const auto& ref_corners = hist_.front().corners;
         for (const auto& d : hist_) {
             const double dc = cv::norm(d.center - ref_center);
             if (dc > cfg_.max_center_jitter_px) {
-                reset();
+                hist_.clear();
                 return false;
             }
             for (int i = 0; i < 4; ++i) {
                 const double dj = cv::norm(d.corners[i] - ref_corners[i]);
                 if (dj > cfg_.max_corner_jitter_px) {
-                    reset();
+                    hist_.clear();
                     return false;
                 }
             }
         }
 
+        locked_ = hist_.back();
         locked_.found = true;
-        locked_.family = hist_.back().family;
-        locked_.id = hist_.back().id;
-        locked_.corners = hist_.back().corners;
-        locked_.center = hist_.back().center;
-        locked_.area = hist_.back().area;
+        return true;
+    }
+
+    bool force_lock(const AprilTagDetection& det, const cv::Size& image_size) {
+        if (!det.found) return false;
+        const double area_ratio = det.area / std::max(1.0, static_cast<double>(image_size.area()));
+        if (area_ratio < cfg_.min_quad_area_ratio) return false;
+        locked_ = det;
+        locked_.found = true;
         return true;
     }
 
     bool locked() const { return locked_.found; }
     AprilTagDetection locked_det() const { return locked_; }
+    AprilTagDetection last_candidate() const { return last_candidate_; }
+    int history_size() const { return static_cast<int>(hist_.size()); }
 
 private:
     AprilTagConfig cfg_;
     std::deque<AprilTagDetection> hist_;
     AprilTagDetection locked_{};
+    AprilTagDetection last_candidate_{};
 };
 
 static bool compute_homography_from_tag_quad(const AprilTagDetection& det,
@@ -303,17 +311,19 @@ static void draw_detection_overlay(cv::Mat& frame, const AprilTagDetection& det,
     }
     cv::circle(frame, det.center, 4, {255, 0, 255}, -1);
     std::ostringstream oss;
-    oss << "Tag " << det.family << " id=" << det.id;
+    oss << det.family << " id=" << det.id;
     if (locked) oss << " [LOCKED]";
     cv::putText(frame, oss.str(), {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
 }
 
-static void draw_roi_overlay(cv::Mat& warped, const RoiSet& rois, const HomographyLock& lock) {
+static void draw_roi_overlay(cv::Mat& warped, const RoiSet& rois, const HomographyLock& lock, char selected_roi = '1') {
     const cv::Rect rr = ratio_to_rect(rois.red_roi, warped.size());
     const cv::Rect ir = ratio_to_rect(rois.image_roi, warped.size());
-    cv::rectangle(warped, rr, {0,0,255}, 2);
+    const int red_thick = (selected_roi == '1') ? 3 : 2;
+    const int img_thick = (selected_roi == '2') ? 3 : 2;
+    cv::rectangle(warped, rr, {0,0,255}, red_thick);
     cv::putText(warped, "red_roi", rr.tl() + cv::Point(4, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, {0,0,255}, 2);
-    cv::rectangle(warped, ir, {255,0,0}, 2);
+    cv::rectangle(warped, ir, {255,0,0}, img_thick);
     cv::putText(warped, "image_roi", ir.tl() + cv::Point(4, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, {255,0,0}, 2);
     std::ostringstream oss;
     oss << "Warp lock: " << lock.family << " id=" << lock.id;
@@ -323,10 +333,11 @@ static void draw_roi_overlay(cv::Mat& warped, const RoiSet& rois, const Homograp
 static bool save_homography_json(const std::string& path, const HomographyLock& lock) {
     if (!lock.valid || lock.H.empty()) return false;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream out(path);
+    std::ofstream out(path, std::ios::trunc);
     if (!out.is_open()) return false;
     out << std::fixed << std::setprecision(10);
     out << "{\n";
+    out << "  \"valid\": true,\n";
     out << "  \"family\": \"" << lock.family << "\",\n";
     out << "  \"id\": " << lock.id << ",\n";
     out << "  \"warp_width\": " << lock.warp_size.width << ",\n";
@@ -338,15 +349,18 @@ static bool save_homography_json(const std::string& path, const HomographyLock& 
             out << lock.H.at<double>(r, c);
             if (c < 2) out << ", ";
         }
-        out << "]" << (r < 2 ? "," : "") << "\n";
+        out << "]";
+        if (r < 2) out << ',';
+        out << "\n";
     }
-    out << "  ]\n}";
+    out << "  ]\n";
+    out << "}\n";
     return true;
 }
 
 static bool save_rois_json(const std::string& path, const RoiSet& rois) {
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream out(path);
+    std::ofstream out(path, std::ios::trunc);
     if (!out.is_open()) return false;
     out << std::fixed << std::setprecision(6);
     out << "{\n";
@@ -356,58 +370,32 @@ static bool save_rois_json(const std::string& path, const RoiSet& rois) {
     return true;
 }
 
-static bool extract_scalar_after(const std::string& s, size_t start, double& value) {
+static bool extract_double_after(const std::string& s, size_t start, double& value) {
     size_t p = start;
     while (p < s.size() && !(std::isdigit(static_cast<unsigned char>(s[p])) || s[p] == '-' || s[p] == '.')) ++p;
     if (p >= s.size()) return false;
     size_t e = p + 1;
-    while (e < s.size() && (std::isdigit(static_cast<unsigned char>(s[e])) || s[e] == '.' || s[e] == '-' || s[e] == '+' || s[e] == 'e' || s[e] == 'E')) ++e;
+    while (e < s.size() && (std::isdigit(static_cast<unsigned char>(s[e])) || s[e] == '.' || s[e] == '-' || s[e] == 'e' || s[e] == 'E' || s[e] == '+')) ++e;
     value = std::stod(s.substr(p, e - p));
     return true;
 }
 
-static bool extract_int_key(const std::string& s, const std::string& key, int& value) {
-    const std::string token = "\"" + key + "\"";
-    const size_t p = s.find(token);
-    if (p == std::string::npos) return false;
-    double tmp = 0.0;
-    if (!extract_scalar_after(s, p + token.size(), tmp)) return false;
-    value = static_cast<int>(std::llround(tmp));
-    return true;
+static bool extract_named_double(const std::string& s, const std::string& section, const std::string& key, double& value) {
+    size_t sec = s.find(section);
+    if (sec == std::string::npos) return false;
+    size_t k = s.find(key, sec);
+    if (k == std::string::npos) return false;
+    return extract_double_after(s, k + key.size(), value);
 }
 
-static bool extract_named_roi(const std::string& s, const std::string& key, RoiRatio& roi) {
-    const std::string token = "\"" + key + "\"";
-    size_t p = s.find(token);
-    if (p == std::string::npos) return false;
-    size_t block_end = s.find('}', p);
-    if (block_end == std::string::npos) return false;
-    const std::string block = s.substr(p, block_end - p + 1);
-
-    auto get = [&](const std::string& subkey, double& outv) -> bool {
-        const std::string t = "\"" + subkey + "\"";
-        const size_t q = block.find(t);
-        if (q == std::string::npos) return false;
-        return extract_scalar_after(block, q + t.size(), outv);
-    };
-
-    if (!get("x", roi.x)) return false;
-    if (!get("y", roi.y)) return false;
-    if (!get("w", roi.w)) return false;
-    if (!get("h", roi.h)) return false;
-    return clamp_and_validate_roi(roi);
-}
-
-static bool load_rois_json(const std::string& path, RoiSet& rois) {
-    std::ifstream in(path);
-    if (!in.is_open()) return false;
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    const std::string s = ss.str();
-    RoiSet tmp = rois;
-    if (!extract_named_roi(s, "red_roi", tmp.red_roi)) return false;
-    if (!extract_named_roi(s, "image_roi", tmp.image_roi)) return false;
-    rois = tmp;
+static bool extract_named_int(const std::string& s, const std::string& key, int& value) {
+    double d = 0.0;
+    if (!extract_named_double(s, key, key, d)) {
+        size_t pos = s.find(key);
+        if (pos == std::string::npos) return false;
+        if (!extract_double_after(s, pos + key.size(), d)) return false;
+    }
+    value = static_cast<int>(std::lround(d));
     return true;
 }
 
@@ -419,126 +407,72 @@ static bool load_homography_json(const std::string& path, HomographyLock& lock) 
     const std::string s = ss.str();
 
     int w = 0, h = 0, id = -1;
-    if (!extract_int_key(s, "warp_width", w)) return false;
-    if (!extract_int_key(s, "warp_height", h)) return false;
-    if (!extract_int_key(s, "id", id)) return false;
+    size_t pw = s.find("\"warp_width\"");
+    size_t ph = s.find("\"warp_height\"");
+    size_t pi = s.find("\"id\"");
+    if (pw == std::string::npos || ph == std::string::npos || pi == std::string::npos) return false;
+    double tmp = 0.0;
+    if (!extract_double_after(s, pw, tmp)) return false; w = static_cast<int>(std::lround(tmp));
+    if (!extract_double_after(s, ph, tmp)) return false; h = static_cast<int>(std::lround(tmp));
+    if (!extract_double_after(s, pi, tmp)) return false; id = static_cast<int>(std::lround(tmp));
+
+    size_t pf = s.find("\"family\"");
+    std::string family;
+    if (pf != std::string::npos) {
+        size_t colon = s.find(':', pf);
+        size_t q1 = (colon == std::string::npos) ? std::string::npos : s.find('"', colon + 1);
+        size_t q2 = (q1 == std::string::npos) ? std::string::npos : s.find('"', q1 + 1);
+        if (q1 != std::string::npos && q2 != std::string::npos) {
+            family = s.substr(q1 + 1, q2 - q1 - 1);
+        }
+    }
 
     std::vector<double> vals;
     vals.reserve(9);
     size_t p = s.find("\"H\"");
     if (p == std::string::npos) return false;
-    while (p < s.size() && vals.size() < 9) {
-        double v = 0.0;
-        if (extract_scalar_after(s, p, v)) {
-            vals.push_back(v);
-            size_t next = p;
-            while (next < s.size() && !(std::isdigit(static_cast<unsigned char>(s[next])) || s[next] == '-' || s[next] == '.')) ++next;
-            while (next < s.size() && (std::isdigit(static_cast<unsigned char>(s[next])) || s[next] == '.' || s[next] == '-' || s[next] == '+' || s[next] == 'e' || s[next] == 'E')) ++next;
-            p = next;
-        } else {
-            ++p;
+    for (; p < s.size() && vals.size() < 9; ++p) {
+        if (std::isdigit(static_cast<unsigned char>(s[p])) || s[p] == '-' || s[p] == '.') {
+            size_t e = p + 1;
+            while (e < s.size() && (std::isdigit(static_cast<unsigned char>(s[e])) || s[e] == '.' || s[e] == '-' || s[e] == 'e' || s[e] == 'E' || s[e] == '+')) ++e;
+            vals.push_back(std::stod(s.substr(p, e - p)));
+            p = e - 1;
         }
     }
-    if (vals.size() < 9) return false;
+    if (vals.size() != 9) return false;
 
     cv::Mat H(3, 3, CV_64F);
     for (int i = 0; i < 9; ++i) H.at<double>(i / 3, i % 3) = vals[i];
-
     lock.valid = true;
+    lock.family = family;
     lock.id = id;
     lock.warp_size = cv::Size(w, h);
     lock.H = H.clone();
     lock.Hinv = H.inv();
-    return !lock.H.empty() && !lock.Hinv.empty();
+    return true;
 }
 
-static cv::Mat crop_roi_clone(const cv::Mat& warped, const RoiRatio& roi) {
-    if (warped.empty()) return {};
-    return warped(ratio_to_rect(roi, warped.size())).clone();
-}
+static bool load_rois_json(const std::string& path, RoiSet& rois) {
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string s = ss.str();
 
-// ---------------------------------------------------------------------------
-// Mouse-drag support for the warp-preview window.
-// Register once with cv::setMouseCallback("vision_app_warp", on_warp_mouse, &data).
-// Left-button drag  : moves the selected ROI.
-// Right-button drag : resizes the selected ROI by dragging its bottom-right corner.
-// ---------------------------------------------------------------------------
-struct WarpMouseCbData {
-    RoiSet*  rois         = nullptr;
-    cv::Size warp_size    {};
-    bool     lock_valid   = false;   // set to true once the homography is locked
-    char*    selected_roi = nullptr; // pointer to the caller's '1'/'2' selector
+    RoiSet tmp = rois;
+    if (!extract_named_double(s, "\"red_roi\"", "\"x\"", tmp.red_roi.x)) return false;
+    if (!extract_named_double(s, "\"red_roi\"", "\"y\"", tmp.red_roi.y)) return false;
+    if (!extract_named_double(s, "\"red_roi\"", "\"w\"", tmp.red_roi.w)) return false;
+    if (!extract_named_double(s, "\"red_roi\"", "\"h\"", tmp.red_roi.h)) return false;
+    if (!extract_named_double(s, "\"image_roi\"", "\"x\"", tmp.image_roi.x)) return false;
+    if (!extract_named_double(s, "\"image_roi\"", "\"y\"", tmp.image_roi.y)) return false;
+    if (!extract_named_double(s, "\"image_roi\"", "\"w\"", tmp.image_roi.w)) return false;
+    if (!extract_named_double(s, "\"image_roi\"", "\"h\"", tmp.image_roi.h)) return false;
 
-    // internal drag state
-    bool     is_dragging  = false;
-    bool     is_resizing  = false;
-    int      drag_roi     = 0;       // 1 = red_roi, 2 = image_roi
-    cv::Point drag_start  {};
-    RoiRatio roi_at_drag_start {};
-};
-
-static void on_warp_mouse(int event, int x, int y, int /*flags*/, void* userdata) {
-    auto* d = static_cast<WarpMouseCbData*>(userdata);
-    if (!d || !d->rois || !d->lock_valid || d->warp_size.area() == 0) return;
-
-    const cv::Point pt(x, y);
-
-    auto pick_roi = [&]() -> int {
-        const cv::Rect rr = ratio_to_rect(d->rois->red_roi,   d->warp_size);
-        const cv::Rect ir = ratio_to_rect(d->rois->image_roi, d->warp_size);
-        if (rr.contains(pt)) return 1;
-        if (ir.contains(pt)) return 2;
-        return 0;
-    };
-
-    auto current_roi = [&]() -> RoiRatio& {
-        return (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
-    };
-
-    if (event == cv::EVENT_LBUTTONDOWN) {
-        d->drag_roi = pick_roi();
-        if (d->drag_roi) {
-            d->is_dragging        = true;
-            d->drag_start         = pt;
-            d->roi_at_drag_start  = (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
-            if (d->selected_roi) *d->selected_roi = static_cast<char>('0' + d->drag_roi);
-        }
-    } else if (event == cv::EVENT_RBUTTONDOWN) {
-        d->drag_roi = pick_roi();
-        if (d->drag_roi) {
-            d->is_resizing        = true;
-            d->drag_start         = pt;
-            d->roi_at_drag_start  = (d->drag_roi == 1) ? d->rois->red_roi : d->rois->image_roi;
-            if (d->selected_roi) *d->selected_roi = static_cast<char>('0' + d->drag_roi);
-        }
-    } else if (event == cv::EVENT_MOUSEMOVE) {
-        if (d->is_dragging && d->drag_roi) {
-            const double dx = static_cast<double>(x - d->drag_start.x) / d->warp_size.width;
-            const double dy = static_cast<double>(y - d->drag_start.y) / d->warp_size.height;
-            RoiRatio& roi  = current_roi();
-            roi.x = d->roi_at_drag_start.x + dx;
-            roi.y = d->roi_at_drag_start.y + dy;
-            roi.w = d->roi_at_drag_start.w;
-            roi.h = d->roi_at_drag_start.h;
-            clamp_and_validate_roi(roi);
-        } else if (d->is_resizing && d->drag_roi) {
-            // Right-drag moves the bottom-right corner, changing w and h.
-            const double dx = static_cast<double>(x - d->drag_start.x) / d->warp_size.width;
-            const double dy = static_cast<double>(y - d->drag_start.y) / d->warp_size.height;
-            RoiRatio& roi  = current_roi();
-            roi.x = d->roi_at_drag_start.x;
-            roi.y = d->roi_at_drag_start.y;
-            roi.w = d->roi_at_drag_start.w + dx;
-            roi.h = d->roi_at_drag_start.h + dy;
-            clamp_and_validate_roi(roi);
-        }
-    } else if (event == cv::EVENT_LBUTTONUP) {
-        d->is_dragging = false;
-        d->drag_roi    = 0;
-    } else if (event == cv::EVENT_RBUTTONUP) {
-        d->is_resizing = false;
-        d->drag_roi    = 0;
-    }
+    if (!clamp_and_validate_roi(tmp.red_roi)) return false;
+    if (!clamp_and_validate_roi(tmp.image_roi)) return false;
+    rois = tmp;
+    return true;
 }
 
 } // namespace vision_app
