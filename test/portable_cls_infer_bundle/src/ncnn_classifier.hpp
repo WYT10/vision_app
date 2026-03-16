@@ -28,7 +28,7 @@ public:
     bool load(const fs::path& param_path,
               const fs::path& bin_path,
               const fs::path& labels_path,
-              const Config& cfg) {
+              const Config& cfg = Config()) {
         cfg_ = cfg;
         labels_ = read_labels(labels_path);
 
@@ -44,7 +44,6 @@ public:
 
         net_.clear();
         net_.opt.use_vulkan_compute = cfg_.use_vulkan;
-        net_.opt.num_threads = cfg_.num_threads;
         net_.opt.use_fp16_packed = true;
         net_.opt.use_fp16_storage = true;
         net_.opt.use_fp16_arithmetic = false;  // safer default on CPU-only boards
@@ -56,12 +55,6 @@ public:
             throw std::runtime_error("Failed to load ncnn bin: " + bin_path.string());
         }
         return true;
-    }
-
-    bool load(const fs::path& param_path,
-              const fs::path& bin_path,
-              const fs::path& labels_path) {
-        return load(param_path, bin_path, labels_path, Config{});
     }
 
     Result classify(const cv::Mat& image_bgr, int topk_override = -1) const {
@@ -81,6 +74,7 @@ public:
 
         ncnn::Extractor ex = net_.create_extractor();
         ex.set_light_mode(true);
+        ex.set_num_threads(cfg_.num_threads);
 
         if (ex.input(cfg_.input_blob.c_str(), in) != 0) {
             throw std::runtime_error("NCNN input failed for blob: " + cfg_.input_blob);

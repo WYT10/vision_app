@@ -116,20 +116,20 @@ public:
 #if defined(HAVE_ONNX_RUNTIME)
 class OnnxAdapter final : public IClassifier {
 public:
-    explicit OnnxAdapter(std::unique_ptr<portable_cls::OnnxClassifier> impl) : impl_(std::move(impl)) {}
-    Result classify(const cv::Mat& image, int topk) const override { return impl_->classify(image, topk); }
+    explicit OnnxAdapter(portable_cls::OnnxClassifier impl) : impl_(std::move(impl)) {}
+    Result classify(const cv::Mat& image, int topk) const override { return impl_.classify(image, topk); }
 private:
-    std::unique_ptr<portable_cls::OnnxClassifier> impl_;
+    portable_cls::OnnxClassifier impl_;
 };
 #endif
 
 #if defined(HAVE_NCNN)
 class NcnnAdapter final : public IClassifier {
 public:
-    explicit NcnnAdapter(std::unique_ptr<portable_cls::NcnnClassifier> impl) : impl_(std::move(impl)) {}
-    Result classify(const cv::Mat& image, int topk) const override { return impl_->classify(image, topk); }
+    explicit NcnnAdapter(portable_cls::NcnnClassifier impl) : impl_(std::move(impl)) {}
+    Result classify(const cv::Mat& image, int topk) const override { return impl_.classify(image, topk); }
 private:
-    std::unique_ptr<portable_cls::NcnnClassifier> impl_;
+    portable_cls::NcnnClassifier impl_;
 };
 #endif
 
@@ -150,8 +150,8 @@ static std::unique_ptr<IClassifier> make_classifier(const Options& o) {
 #if defined(HAVE_ONNX_RUNTIME)
         portable_cls::OnnxClassifier::Config cfg;
         static_cast<CommonConfig&>(cfg) = build_common_config(o);
-        auto clf = std::make_unique<portable_cls::OnnxClassifier>();
-        clf->load(o.model_path, o.labels_path, cfg);
+        portable_cls::OnnxClassifier clf;
+        clf.load(o.model_path, o.labels_path, cfg);
         return std::make_unique<OnnxAdapter>(std::move(clf));
 #else
         throw std::runtime_error("This build does not include ONNX Runtime support. Reconfigure with -DENABLE_ONNX_RUNTIME=ON.");
@@ -162,8 +162,8 @@ static std::unique_ptr<IClassifier> make_classifier(const Options& o) {
         portable_cls::NcnnClassifier::Config cfg;
         static_cast<CommonConfig&>(cfg) = build_common_config(o);
         cfg.use_vulkan = false;
-        auto clf = std::make_unique<portable_cls::NcnnClassifier>();
-        clf->load(o.model_path, o.weights_path, o.labels_path, cfg);
+        portable_cls::NcnnClassifier clf;
+        clf.load(o.model_path, o.weights_path, o.labels_path, cfg);
         return std::make_unique<NcnnAdapter>(std::move(clf));
 #else
         throw std::runtime_error("This build does not include NCNN support. Reconfigure with -DENABLE_NCNN=ON.");
