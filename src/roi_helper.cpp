@@ -1,7 +1,18 @@
-
 #include "deploy.hpp"
 
+#include <opencv2/imgproc.hpp>
+
 namespace vision_app {
+namespace {
+cv::Mat apply_mask_fill(const cv::Mat& img, const cv::Mat& mask, const cv::Scalar& fill) {
+    cv::Mat out = img.clone();
+    if (out.empty() || mask.empty()) return out;
+    cv::Mat inv;
+    cv::bitwise_not(mask, inv);
+    out.setTo(fill, inv);
+    return out;
+}
+} // namespace
 
 bool extract_runtime_rois(const cv::Mat& warped,
                           const cv::Mat& valid_mask,
@@ -18,7 +29,7 @@ bool extract_runtime_rois(const cv::Mat& warped,
     const cv::Rect ir = roi_to_rect(rois.image_roi, warped.size());
     out.red_bgr = warped(rr).clone();
     out.red_mask = valid_mask(rr).clone();
-    out.image_bgr = warped(ir).clone();
+    out.image_bgr = apply_mask_fill(warped(ir), valid_mask(ir), cv::Scalar(255,255,255));
     out.image_mask = valid_mask(ir).clone();
     out.red_valid_pixels = cv::countNonZero(out.red_mask);
     out.image_valid_pixels = cv::countNonZero(out.image_mask);

@@ -1,4 +1,3 @@
-
 #include <cctype>
 #include <fstream>
 #include <iostream>
@@ -52,21 +51,18 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "drain_grabs") o.drain_grabs = std::stoi(v);
         else if (k == "headless") o.headless = parse_bool(v);
         else if (k == "duration") o.duration = std::stoi(v);
-        else if (k == "ui") o.ui = parse_bool(v);
-        else if (k == "debug") o.debug = parse_bool(v);
-        else if (k == "save_roi_frames") o.save_roi_frames = parse_bool(v);
-        else if (k == "save_roi_dir") o.save_roi_dir = v;
         else if (k == "camera_soft_max") o.camera_soft_max = std::stoi(v);
         else if (k == "camera_preview_max") o.camera_preview_max = std::stoi(v);
         else if (k == "warp_preview_max") o.warp_preview_max = std::stoi(v);
-        else if (k == "tag_family") o.tag_cfg.family = v;
-        else if (k == "target_id") o.tag_cfg.target_id = std::stoi(v);
-        else if (k == "require_target_id") o.tag_cfg.require_target_id = parse_bool(v);
-        else if (k == "manual_lock_only") o.tag_cfg.manual_lock_only = parse_bool(v);
-        else if (k == "lock_frames") o.tag_cfg.lock_frames = std::stoi(v);
+        else if (k == "temp_preview_stride") o.temp_preview_stride = std::stoi(v);
         else if (k == "warp_width") o.warp_width = std::stoi(v);
         else if (k == "warp_height") o.warp_height = std::stoi(v);
         else if (k == "target_tag_px") o.target_tag_px = std::stoi(v);
+        else if (k == "tag_family") o.tag_family = v;
+        else if (k == "target_id") o.target_id = std::stoi(v);
+        else if (k == "require_target_id") o.require_target_id = parse_bool(v);
+        else if (k == "manual_lock_only") o.manual_lock_only = parse_bool(v);
+        else if (k == "lock_frames") o.lock_frames = std::stoi(v);
         else if (k == "save_warp") o.save_warp = v;
         else if (k == "load_warp") o.load_warp = v;
         else if (k == "save_rois") o.save_rois = v;
@@ -98,6 +94,12 @@ static void load_config(const std::string& path, AppOptions& o) {
 static void print_help() {
     std::cout
         << "vision_app modes: probe | calibrate | deploy\n\n"
+        << "Build every time with:\n"
+        << "  export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH\n"
+        << "  mkdir -p build\n"
+        << "  cd build\n"
+        << "  cmake ..\n"
+        << "  make -j$(nproc)\n\n"
         << "Core camera args\n"
         << "  --device /dev/video0\n"
         << "  --width 640 --height 480\n"
@@ -106,36 +108,44 @@ static void print_help() {
         << "  --buffer-size 1\n"
         << "  --latest-only 1\n"
         << "  --drain-grabs 1\n"
-        << "  --headless 0\n"
+        << "  --headless 1\n"
         << "  --duration 5\n\n"
         << "Calibration args\n"
         << "  --tag-family auto|16|25|36\n"
         << "  --target-id 0\n"
-        << "  --require-target-id 1\n"
         << "  --warp-width 384 --warp-height 384\n"
         << "  --target-tag-px 128\n"
-        << "  --save-warp PATH --load-warp PATH\n"
-        << "  --save-rois PATH --load-rois PATH\n"
-        << "  --red-roi x,y,w,h --image-roi x,y,w,h\n\n"
+        << "  --manual-lock-only 1\n"
+        << "  --lock-frames 4\n\n"
+        << "UI / preview args\n"
+        << "  --camera-soft-max 1600\n"
+        << "  --camera-preview-max 640\n"
+        << "  --warp-preview-max 640\n"
+        << "  --temp-preview-stride 2\n\n"
+        << "ROI args\n"
+        << "  --red-roi x,y,w,h\n"
+        << "  --image-roi x,y,w,h\n"
+        << "  ratios are in warp space, 0..1\n\n"
         << "Model args\n"
         << "  --model-enable 1\n"
-        << "  --model-backend onnx|ncnn|off\n"
-        << "  --model-onnx-path PATH\n"
-        << "  --model-ncnn-param-path PATH\n"
-        << "  --model-ncnn-bin-path PATH\n"
-        << "  --model-labels-path PATH\n"
+        << "  --model-backend onnx|ncnn\n"
+        << "  --model-onnx-path ../models/best.onnx\n"
+        << "  --model-ncnn-param-path ../models/model.ncnn.param\n"
+        << "  --model-ncnn-bin-path ../models/model.ncnn.bin\n"
+        << "  --model-labels-path ../models/labels.txt\n"
         << "  --model-input-width 128 --model-input-height 128\n"
-        << "  --model-preprocess crop|stretch\n"
-        << "  --model-threads 4 --model-stride 5 --model-topk 5\n\n"
-        << "UI / debug args\n"
-        << "  --ui 1 --debug 1\n"
-        << "  --camera-preview-max 640 --warp-preview-max 640\n"
-        << "  --save-roi-frames 0 --save-roi-dir ../report/roi_snaps\n"
-        << "  --save-report ../report/latest_report.md\n\n"
+        << "  --model-preprocess crop|stretch|letterbox\n"
+        << "  --model-threads 4\n"
+        << "  --model-stride 5\n"
+        << "  --model-topk 5\n\n"
+        << "Save / load\n"
+        << "  --save-warp PATH   --load-warp PATH\n"
+        << "  --save-rois PATH   --load-rois PATH\n"
+        << "  --save-report PATH\n\n"
         << "Examples\n"
-        << "  ./vision_app --mode probe --device /dev/video0 --width 640 --height 480 --fps 120\n"
-        << "  ./vision_app --mode calibrate --device /dev/video0 --width 640 --height 480 --fps 120 --tag-family auto --target-id 0 --warp-width 384 --warp-height 384 --target-tag-px 128\n"
-        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fps 120 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend ncnn --model-ncnn-param-path ../models/model.ncnn.param --model-ncnn-bin-path ../models/model.ncnn.bin --model-labels-path ../models/labels.txt\n";
+        << "  ./vision_app --mode probe\n"
+        << "  ./vision_app --mode calibrate --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --warp-width 384 --warp-height 384 --target-tag-px 128\n"
+        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend ncnn --model-ncnn-param-path ../models/model.ncnn.param --model-ncnn-bin-path ../models/model.ncnn.bin --model-labels-path ../models/labels.txt\n";
 }
 
 int main(int argc, char** argv) {
@@ -160,21 +170,18 @@ int main(int argc, char** argv) {
         else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need("--drain-grabs"));
         else if (a == "--headless") opt.headless = parse_bool(need("--headless"));
         else if (a == "--duration") opt.duration = std::stoi(need("--duration"));
-        else if (a == "--ui") opt.ui = parse_bool(need("--ui"));
-        else if (a == "--debug") opt.debug = parse_bool(need("--debug"));
-        else if (a == "--save-roi-frames") opt.save_roi_frames = parse_bool(need("--save-roi-frames"));
-        else if (a == "--save-roi-dir") opt.save_roi_dir = need("--save-roi-dir");
         else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need("--camera-soft-max"));
         else if (a == "--camera-preview-max") opt.camera_preview_max = std::stoi(need("--camera-preview-max"));
         else if (a == "--warp-preview-max") opt.warp_preview_max = std::stoi(need("--warp-preview-max"));
-        else if (a == "--tag-family") opt.tag_cfg.family = need("--tag-family");
-        else if (a == "--target-id") opt.tag_cfg.target_id = std::stoi(need("--target-id"));
-        else if (a == "--require-target-id") opt.tag_cfg.require_target_id = parse_bool(need("--require-target-id"));
-        else if (a == "--manual-lock-only") opt.tag_cfg.manual_lock_only = parse_bool(need("--manual-lock-only"));
-        else if (a == "--lock-frames") opt.tag_cfg.lock_frames = std::stoi(need("--lock-frames"));
+        else if (a == "--temp-preview-stride") opt.temp_preview_stride = std::stoi(need("--temp-preview-stride"));
         else if (a == "--warp-width") opt.warp_width = std::stoi(need("--warp-width"));
         else if (a == "--warp-height") opt.warp_height = std::stoi(need("--warp-height"));
         else if (a == "--target-tag-px") opt.target_tag_px = std::stoi(need("--target-tag-px"));
+        else if (a == "--tag-family") opt.tag_family = need("--tag-family");
+        else if (a == "--target-id") opt.target_id = std::stoi(need("--target-id"));
+        else if (a == "--require-target-id") opt.require_target_id = parse_bool(need("--require-target-id"));
+        else if (a == "--manual-lock-only") opt.manual_lock_only = parse_bool(need("--manual-lock-only"));
+        else if (a == "--lock-frames") opt.lock_frames = std::stoi(need("--lock-frames"));
         else if (a == "--save-warp") opt.save_warp = need("--save-warp");
         else if (a == "--load-warp") opt.load_warp = need("--load-warp");
         else if (a == "--save-rois") opt.save_rois = need("--save-rois");
@@ -205,10 +212,16 @@ int main(int argc, char** argv) {
 
     std::string err;
     if (opt.mode == "probe") {
-        if (!run_probe(opt, err)) { std::cerr << "Probe failed: " << err << "\n"; return 1; }
+        CameraProbeResult probe;
+        if (!probe_camera(opt.device, probe, err)) { std::cerr << "Probe failed: " << err << "\n"; return 1; }
+        print_probe(probe);
+        RuntimeStats stats;
+        if (bench_capture(opt.device, opt.width, opt.height, opt.fps, opt.fourcc, opt.buffer_size, opt.latest_only, opt.drain_grabs, opt.headless, opt.duration, opt.camera_soft_max, opt.camera_preview_max, stats, err)) {
+            print_runtime_stats(stats);
+        }
         return 0;
     }
-    if (opt.mode == "calibrate") {
+    if (opt.mode == "calibrate" || opt.mode == "live") {
         if (!run_calibrate(opt, err)) { std::cerr << "Calibrate failed: " << err << "\n"; return 1; }
         return 0;
     }
