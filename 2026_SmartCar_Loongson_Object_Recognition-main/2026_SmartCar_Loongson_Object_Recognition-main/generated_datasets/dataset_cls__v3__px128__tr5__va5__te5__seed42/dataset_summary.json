@@ -117,20 +117,6 @@
       "val": 760,
       "test": 760
     },
-    "char_3": {
-      "source_name": "字母和数字标识/3.jpg",
-      "total": 15,
-      "train": 5,
-      "val": 5,
-      "test": 5
-    },
-    "char_A": {
-      "source_name": "字母和数字标识/A.jpg",
-      "total": 15,
-      "train": 5,
-      "val": 5,
-      "test": 5
-    },
     "char_E": {
       "source_name": "字母和数字标识/E.jpg",
       "total": 15,
@@ -152,8 +138,15 @@
       "val": 5,
       "test": 5
     },
-    "char_D": {
-      "source_name": "字母和数字标识/D.jpg",
+    "char_3": {
+      "source_name": "字母和数字标识/3.jpg",
+      "total": 15,
+      "train": 5,
+      "val": 5,
+      "test": 5
+    },
+    "char_A": {
+      "source_name": "字母和数字标识/A.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
@@ -166,22 +159,15 @@
       "val": 5,
       "test": 5
     },
+    "char_D": {
+      "source_name": "字母和数字标识/D.jpg",
+      "total": 15,
+      "train": 5,
+      "val": 5,
+      "test": 5
+    },
     "char_C": {
       "source_name": "字母和数字标识/C.jpg",
-      "total": 15,
-      "train": 5,
-      "val": 5,
-      "test": 5
-    },
-    "char_G": {
-      "source_name": "字母和数字标识/G.jpg",
-      "total": 15,
-      "train": 5,
-      "val": 5,
-      "test": 5
-    },
-    "char_I": {
-      "source_name": "字母和数字标识/I.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
@@ -194,8 +180,8 @@
       "val": 5,
       "test": 5
     },
-    "char_K": {
-      "source_name": "字母和数字标识/K.jpg",
+    "char_G": {
+      "source_name": "字母和数字标识/G.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
@@ -208,8 +194,15 @@
       "val": 5,
       "test": 5
     },
-    "char_J": {
-      "source_name": "字母和数字标识/J.jpg",
+    "char_I": {
+      "source_name": "字母和数字标识/I.jpg",
+      "total": 15,
+      "train": 5,
+      "val": 5,
+      "test": 5
+    },
+    "char_K": {
+      "source_name": "字母和数字标识/K.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
@@ -222,6 +215,13 @@
       "val": 5,
       "test": 5
     },
+    "char_J": {
+      "source_name": "字母和数字标识/J.jpg",
+      "total": 15,
+      "train": 5,
+      "val": 5,
+      "test": 5
+    },
     "char_L": {
       "source_name": "字母和数字标识/L.jpg",
       "total": 15,
@@ -229,15 +229,15 @@
       "val": 5,
       "test": 5
     },
-    "char_N": {
-      "source_name": "字母和数字标识/N.jpg",
+    "char_O": {
+      "source_name": "字母和数字标识/O.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
       "test": 5
     },
-    "char_O": {
-      "source_name": "字母和数字标识/O.jpg",
+    "char_N": {
+      "source_name": "字母和数字标识/N.jpg",
       "total": 15,
       "train": 5,
       "val": 5,
@@ -266,23 +266,23 @@
     "M_ambulance: each source image appears in train/val/test; this causes split leakage and optimistic metrics.",
     "N_armored_vehicle: each source image appears in train/val/test; this causes split leakage and optimistic metrics.",
     "O_motorcycle: each source image appears in train/val/test; this causes split leakage and optimistic metrics.",
-    "char_3: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_A: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_E: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_1: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_B: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_D: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_3: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_A: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_2: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_D: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_C: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_G: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_I: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_F: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_K: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_G: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_H: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_J: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_I: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_K: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_M: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_J: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
     "char_L: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_N: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
-    "char_O: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization."
+    "char_O: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization.",
+    "char_N: one source image is expanded into train/val/test; metrics measure transform robustness, not true generalization."
   ]
 }
