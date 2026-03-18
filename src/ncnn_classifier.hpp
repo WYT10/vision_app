@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <ncnn/net.h>
+#include "net.h"
 
 #include "classifier_common.hpp"
 
@@ -59,7 +59,7 @@ public:
         }
         ncnn::Mat out;
         if (ex.extract(output_blob_name_.c_str(), out) != 0) {
-            r.summary = "ncnn extract failed";
+            r.summary = std::string("ncnn extract failed for output blob: ") + output_blob_name_;
             return r;
         }
         const auto t1 = std::chrono::steady_clock::now();
@@ -85,22 +85,77 @@ private:
     static bool infer_io_names_from_param(const std::string& param_path, std::string& in_name, std::string& out_name) {
         std::ifstream in(param_path);
         if (!in.is_open()) return false;
-        std::string line;
-        std::vector<std::string> lines;
-        while (std::getline(in, line)) if (!line.empty()) lines.push_back(line);
-        if (lines.size() < 3) return false;
+        auto trim = [](std::string s) {
+            const auto a = s.find_first_not_of(" 	
+");
+            if (a == std::string::npos) return std::string();
+            const auto b = s.find_last_not_of(" 	
+");
+            return s.substr(a, b - a + 1);
+        };
         auto split_ws = [](const std::string& s) {
             std::istringstream iss(s);
             std::vector<std::string> tok; std::string t;
             while (iss >> t) tok.push_back(t);
             return tok;
         };
-        auto first = split_ws(lines[2]);
-        auto last = split_ws(lines.back());
-        if (first.size() < 5 || last.size() < 5) return false;
-        in_name = first[4];
-        out_name = last.back();
-        return true;
+
+        std::string line;
+        bool skipped_magic = false;
+        bool skipped_counts = false;
+        std::vector<std::string> produced;
+        std::vector<std::string> consumed;
+        std::vector<std::string> input_layer_tops;
+
+        while (std::getline(in, line)) {
+            line = trim(line);
+            if (line.empty() || line[0] == '#') continue;
+            if (!skipped_magic) { skipped_magic = true; continue; }
+            if (!skipped_counts) { skipped_counts = true; continue; }
+
+            auto tok = split_ws(line);
+            if (tok.size() < 4) continue;
+
+            int bottom_count = 0;
+            int top_count = 0;
+            try {
+                bottom_count = std::stoi(tok[2]);
+                top_count = std::stoi(tok[3]);
+            } catch (...) {
+                continue;
+            }
+
+            const size_t names_begin = 4;
+            const size_t bottoms_begin = names_begin;
+            const size_t tops_begin = bottoms_begin + static_cast<size_t>(bottom_count);
+            const size_t need = tops_begin + static_cast<size_t>(top_count);
+            if (tok.size() < need) continue;
+
+            const std::string& layer_type = tok[0];
+            for (int i = 0; i < bottom_count; ++i) consumed.push_back(tok[bottoms_begin + static_cast<size_t>(i)]);
+            for (int i = 0; i < top_count; ++i) {
+                const auto& name = tok[tops_begin + static_cast<size_t>(i)];
+                produced.push_back(name);
+                if (layer_type == "Input") input_layer_tops.push_back(name);
+            }
+        }
+
+        if (!input_layer_tops.empty()) in_name = input_layer_tops.front();
+        else if (!produced.empty()) in_name = produced.front();
+        else return false;
+
+        for (auto it = produced.rbegin(); it != produced.rend(); ++it) {
+            if (std::find(consumed.begin(), consumed.end(), *it) == consumed.end()) {
+                out_name = *it;
+                return true;
+            }
+        }
+
+        if (!produced.empty()) {
+            out_name = produced.back();
+            return true;
+        }
+        return false;
     }
 
     Config cfg_;

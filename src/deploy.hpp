@@ -237,6 +237,30 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
     return err.empty();
 }
 
+
+inline std::string build_deploy_config_warning(const AppOptions& opt, const WarpPackage& pack, int live_w, int live_h) {
+    std::ostringstream oss;
+    bool any = false;
+    if (pack.src_size.width != live_w || pack.src_size.height != live_h) {
+        oss << "[warn] live camera size " << live_w << 'x' << live_h
+            << " does not match saved warp source size " << pack.src_size.width << 'x' << pack.src_size.height
+            << ". Deploy warp will be invalid until you use the same camera mode or recalibrate.
+";
+        any = true;
+    }
+    if (opt.warp_width != pack.warp_size.width || opt.warp_height != pack.warp_size.height || opt.target_tag_px != pack.target_tag_px) {
+        oss << "[warn] deploy uses the saved warp package values, not the current CLI calibration hints. "
+            << "saved warp=" << pack.warp_size.width << 'x' << pack.warp_size.height
+            << " tag_px=" << pack.target_tag_px
+            << ", CLI warp=" << opt.warp_width << 'x' << opt.warp_height
+            << " tag_px=" << opt.target_tag_px << "
+";
+        any = true;
+    }
+    if (!any) return {};
+    return oss.str();
+}
+
 inline bool run_deploy(const AppOptions& opt, std::string& err) {
     WarpPackage pack;
     if (!load_warp_package(opt.load_warp, pack)) { err = "failed to load warp package: " + opt.load_warp; return false; }
@@ -253,6 +277,10 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
     int cam_w = opt.width, cam_h = opt.height;
     cv::VideoCapture cap;
     if (!open_capture(cap, opt.device, cam_w, cam_h, opt.fps, opt.fourcc, opt.buffer_size, opt.camera_soft_max, err)) return false;
+
+    const std::string deploy_warn = build_deploy_config_warning(opt, pack, cam_w, cam_h);
+    if (!deploy_warn.empty() && opt.debug) std::cerr << deploy_warn;
+    const bool fatal_src_mismatch = (pack.src_size.width != cam_w || pack.src_size.height != cam_h);
 
     cv::Mat frame, warped, valid, camera_show, warp_show;
     RoiRuntimeData roi_info;
@@ -273,7 +301,15 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         const auto f0 = clk::now();
         if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; break; }
         const auto t0 = clk::now();
-        if (!apply_warp(frame, pack, warped, &valid)) { err = "failed to apply warp"; break; }
+        if (!apply_warp(frame, pack, warped, &valid)) {
+            if (fatal_src_mismatch) {
+                err = cv::format("failed to apply warp: live frame is %dx%d but saved warp expects %dx%d",
+                                 frame.cols, frame.rows, pack.src_size.width, pack.src_size.height);
+            } else {
+                err = "failed to apply warp";
+            }
+            break;
+        }
         const auto t1 = clk::now();
         std::string rerr;
         if (!extract_runtime_rois(warped, valid, rois, opt.red_cfg, roi_info, rerr)) { err = rerr; break; }
@@ -290,6 +326,9 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
             warp_show = warped.clone();
             draw_rois(warp_show, rois, -1);
             cv::putText(warp_show, cv::format("red_ratio=%.3f", roi_info.red_ratio), {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.60, cv::Scalar(0,120,0), 2);
+            if (!deploy_warn.empty()) {
+                cv::putText(warp_show, "WARN: saved warp/config override active; see terminal", {12, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,0,255), 1);
+            }
             cv::putText(warp_show, cv::format("warp %.2fms roi %.2fms infer %.2fms", 
                 std::chrono::duration<double,std::milli>(t1-t0).count(),
                 std::chrono::duration<double,std::milli>(t2-t1).count(),
@@ -327,6 +366,7 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
           << "- Target tag px: " << pack.target_tag_px << "\n"
           << "- Model input: " << opt.model_cfg.input_width << 'x' << opt.model_cfg.input_height << "\n"
           << "- Last model summary: " << model_res.summary << "\n";
+    if (!deploy_warn.empty()) extra << "\n## Warnings\n\n```\n" << deploy_warn << "```\n";
     (void)write_report_md(opt.save_report, "vision_app deploy report", &stats, extra.str());
     if (!opt.headless) cv::destroyAllWindows();
     release_model_runtime();

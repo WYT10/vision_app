@@ -275,8 +275,21 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
     return build_centered_warp_package_from_detection(det, src_size, warp_soft_max, 0.70, pack, err);
 }
 
+inline bool warp_source_size_matches(const cv::Size& src_size, const WarpPackage& pack) {
+    return pack.valid && src_size == pack.src_size;
+}
+
+inline std::string describe_warp_package(const WarpPackage& pack) {
+    return cv::format("family=%s id=%d src=%dx%d warp=%dx%d tag_px=%d",
+                      pack.family.c_str(), pack.id,
+                      pack.src_size.width, pack.src_size.height,
+                      pack.warp_size.width, pack.warp_size.height,
+                      pack.target_tag_px);
+}
+
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {
     if (!pack.valid || src.empty()) return false;
+    if (src.size() != pack.src_size) return false;
     cv::remap(src, dst, pack.map1, pack.map2, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255,255,255));
     if (dst.empty()) return false;
     if (out_valid) *out_valid = pack.valid_mask;
