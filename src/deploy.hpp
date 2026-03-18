@@ -1,8 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "camera.hpp"
 #include "calibrate.hpp"
@@ -19,15 +22,36 @@ struct RedThresholdConfig {
     int v_min = 60;
 };
 
+struct ModelScore {
+    int index = -1;
+    float probability = 0.0f;
+    std::string label;
+};
+
 struct ModelConfig {
     bool enable = false;
     std::string backend = "off";   // off | onnx | ncnn
+
+    // legacy generic path; still supported for onnx or ncnn .param
     std::string path;
+
+    // preferred explicit paths
+    std::string onnx_path;
+    std::string ncnn_param_path;
+    std::string ncnn_bin_path;
+    std::string labels_path;
+
     int input_width = 224;
     int input_height = 224;
-    bool swap_rb = true;
-    double scale = 1.0 / 255.0;
+    int threads = 4;
+    int topk = 5;
     int stride = 5;
+
+    std::string preprocess = "crop";  // crop | stretch | letterbox
+    std::array<float, 3> mean_vals{0.f, 0.f, 0.f};
+    std::array<float, 3> norm_vals{1.f / 255.f, 1.f / 255.f, 1.f / 255.f};
+
+    bool quiet_onnx_load = true;
 };
 
 struct ModelResult {
@@ -35,7 +59,9 @@ struct ModelResult {
     bool ok = false;
     int top_index = -1;
     float top_score = 0.0f;
+    std::string top_label;
     std::string summary;
+    std::vector<ModelScore> topk;
 };
 
 struct RoiRuntimeData {
@@ -185,7 +211,7 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
     (void)load_rois_yaml(opt.load_rois, rois);
 
     bool model_ready = false;
-    if (opt.model_cfg.enable && opt.model_cfg.backend != "off" && !opt.model_cfg.path.empty()) {
+    if (opt.model_cfg.enable && opt.model_cfg.backend != "off") {
         std::string merr;
         model_ready = init_model_runtime(opt.model_cfg, merr);
         if (!model_ready) std::cerr << "\n[model] disabled: " << merr << "\n";
@@ -219,10 +245,20 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
 
     print_live_controls();
 
+    auto last_tick = std::chrono::steady_clock::now();
+    double fps_ema = 0.0;
+
     while (true) {
         if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) {
             err = "failed to read frame";
             break;
+        }
+        const auto now_tick = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now_tick - last_tick).count();
+        last_tick = now_tick;
+        if (dt > 1e-6) {
+            const double fps_now = 1.0 / dt;
+            fps_ema = fps_ema <= 0.0 ? fps_now : (fps_ema * 0.9 + fps_now * 0.1);
         }
 
         if (!locked) {
@@ -381,7 +417,7 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
     (void)load_rois_yaml(opt.load_rois, rois);
 
     bool model_ready = false;
-    if (opt.model_cfg.enable && opt.model_cfg.backend != "off" && !opt.model_cfg.path.empty()) {
+    if (opt.model_cfg.enable && opt.model_cfg.backend != "off") {
         std::string merr;
         model_ready = init_model_runtime(opt.model_cfg, merr);
         if (!model_ready) std::cerr << "\n[model] disabled: " << merr << "\n";
@@ -409,20 +445,39 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
               << "loaded rois: " << opt.load_rois << "\n";
 
     int frame_idx = 0;
+    auto last_tick = std::chrono::steady_clock::now();
+    double fps_ema = 0.0;
     while (true) {
         if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; break; }
+        const auto now_tick = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now_tick - last_tick).count();
+        last_tick = now_tick;
+        if (dt > 1e-6) {
+            const double fps_now = 1.0 / dt;
+            fps_ema = fps_ema <= 0.0 ? fps_now : (fps_ema * 0.9 + fps_now * 0.1);
+        }
         if (!apply_warp(frame, pack, warped, &valid)) { err = "failed to apply warp"; break; }
         camera_show = downscale_for_preview(frame, opt.camera_preview_max);
         warp_show = warped.clone();
         draw_rois(warp_show, rois, -1);
         cv::putText(warp_show, "DEPLOY family=" + pack.family + " id=" + std::to_string(pack.id), {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,120,0), 2);
+        cv::putText(warp_show, "FPS " + std::to_string(fps_ema).substr(0,5), {12, 52}, cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(0,120,0), 2);
         std::string rerr;
         if (extract_runtime_rois(warped, valid, rois, opt.red_cfg, roi_info, rerr)) {
-            cv::putText(warp_show, "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5), {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,120,0), 2);
+            cv::putText(warp_show, "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5), {12, 78}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,120,0), 2);
             if (model_ready && (frame_idx % std::max(1, opt.model_cfg.stride) == 0)) {
                 std::string merr;
                 if (run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
-                    cv::putText(warp_show, model_res.summary, {12, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,120,0), 1);
+                    cv::putText(warp_show, model_res.summary, {12, 102}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,120,0), 1);
+                    static std::string last_label;
+                    if (model_res.ok && model_res.top_label != last_label) {
+                        std::cout << "\n[classify] " << model_res.top_label << " score=" << model_res.top_score << " backend=" << opt.model_cfg.backend << "\n";
+                        last_label = model_res.top_label;
+                    }
+                    if (!model_res.topk.empty()) {
+                        std::string extra = "top2 " + model_res.topk.front().label + " " + std::to_string(model_res.topk.front().probability).substr(0,5);
+                        cv::putText(warp_show, extra, {12, 102}, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,120,0), 1);
+                    }
                 }
             }
         }

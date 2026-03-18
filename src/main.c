@@ -1,3 +1,4 @@
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <iostream>
@@ -27,6 +28,12 @@ static bool parse_roi_csv(const std::string& s, RoiRatio& r) {
     r.x = vals[0]; r.y = vals[1]; r.w = vals[2]; r.h = vals[3];
     r = clamp_roi(r);
     return true;
+}
+
+static bool parse_triplet_csv(const std::string& s, std::array<float,3>& out) {
+    std::stringstream ss(s); std::string tok; int i = 0;
+    while (std::getline(ss, tok, ',') && i < 3) out[i++] = std::stof(trim(tok));
+    return i == 3;
 }
 
 static void load_config(const std::string& path, AppOptions& o) {
@@ -81,9 +88,19 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "model_enable") o.model_cfg.enable = parse_bool(v);
         else if (k == "model_backend") o.model_cfg.backend = v;
         else if (k == "model_path") o.model_cfg.path = v;
+        else if (k == "model_onnx_path") o.model_cfg.onnx_path = v;
+        else if (k == "model_ncnn_param_path") o.model_cfg.ncnn_param_path = v;
+        else if (k == "model_ncnn_bin_path") o.model_cfg.ncnn_bin_path = v;
+        else if (k == "model_labels_path") o.model_cfg.labels_path = v;
         else if (k == "model_input_width") o.model_cfg.input_width = std::stoi(v);
         else if (k == "model_input_height") o.model_cfg.input_height = std::stoi(v);
+        else if (k == "model_threads") o.model_cfg.threads = std::stoi(v);
+        else if (k == "model_topk") o.model_cfg.topk = std::stoi(v);
         else if (k == "model_stride") o.model_cfg.stride = std::stoi(v);
+        else if (k == "model_preprocess") o.model_cfg.preprocess = v;
+        else if (k == "model_quiet_onnx_load") o.model_cfg.quiet_onnx_load = parse_bool(v);
+        else if (k == "model_mean") parse_triplet_csv(v, o.model_cfg.mean_vals);
+        else if (k == "model_norm") parse_triplet_csv(v, o.model_cfg.norm_vals);
     }
 }
 
@@ -91,6 +108,7 @@ static void print_help() {
     std::cout
         << "vision_app modes: probe | bench | live | deploy\n\n"
         << "Build every time with:\n"
+        << "  export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH\n"
         << "  mkdir -p build\n"
         << "  cd build\n"
         << "  cmake ..\n"
@@ -131,18 +149,22 @@ static void print_help() {
         << "Model args\n"
         << "  --model-enable 1\n"
         << "  --model-backend onnx|ncnn\n"
-        << "  --model-path ../models/model.onnx\n"
+        << "  --model-path PATH                 # legacy generic path\n"
+        << "  --model-onnx-path ../models/best.onnx\n"
+        << "  --model-ncnn-param-path ../models/model.ncnn.param\n"
+        << "  --model-ncnn-bin-path ../models/model.ncnn.bin\n"
+        << "  --model-labels-path ../models/labels.txt\n"
         << "  --model-input-width 224 --model-input-height 224\n"
-        << "  --model-stride 5\n\n"
+        << "  --model-preprocess crop|stretch|letterbox\n"
+        << "  --model-threads 4 --model-topk 5 --model-stride 5\n\n"
         << "Save / load\n"
         << "  --save-warp PATH   --load-warp PATH\n"
         << "  --save-rois PATH   --load-rois PATH\n"
         << "  --save-report PATH\n\n"
         << "Examples\n"
         << "  ./vision_app --mode probe\n"
-        << "  ./vision_app --mode bench --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --headless 1 --duration 10\n"
-        << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1 --tag-fill-ratio 0.70 --camera-preview-max 700 --warp-preview-max 700\n"
-        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend onnx --model-path ../models/model.onnx\n";
+        << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1\n"
+        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend ncnn --model-ncnn-param-path ../models/model.ncnn.param --model-ncnn-bin-path ../models/model.ncnn.bin --model-labels-path ../models/labels.txt\n";
 }
 
 int main(int argc, char** argv) {
@@ -197,9 +219,17 @@ int main(int argc, char** argv) {
         else if (a == "--model-enable") opt.model_cfg.enable = parse_bool(need("--model-enable"));
         else if (a == "--model-backend") opt.model_cfg.backend = need("--model-backend");
         else if (a == "--model-path") opt.model_cfg.path = need("--model-path");
+        else if (a == "--model-onnx-path") opt.model_cfg.onnx_path = need("--model-onnx-path");
+        else if (a == "--model-ncnn-param-path") opt.model_cfg.ncnn_param_path = need("--model-ncnn-param-path");
+        else if (a == "--model-ncnn-bin-path") opt.model_cfg.ncnn_bin_path = need("--model-ncnn-bin-path");
+        else if (a == "--model-labels-path") opt.model_cfg.labels_path = need("--model-labels-path");
         else if (a == "--model-input-width") opt.model_cfg.input_width = std::stoi(need("--model-input-width"));
         else if (a == "--model-input-height") opt.model_cfg.input_height = std::stoi(need("--model-input-height"));
+        else if (a == "--model-threads") opt.model_cfg.threads = std::stoi(need("--model-threads"));
+        else if (a == "--model-topk") opt.model_cfg.topk = std::stoi(need("--model-topk"));
         else if (a == "--model-stride") opt.model_cfg.stride = std::stoi(need("--model-stride"));
+        else if (a == "--model-preprocess") opt.model_cfg.preprocess = need("--model-preprocess");
+        else if (a == "--model-quiet-onnx-load") opt.model_cfg.quiet_onnx_load = parse_bool(need("--model-quiet-onnx-load"));
         else { std::cerr << "unknown argument: " << a << "\n"; return 1; }
     }
 
