@@ -7,7 +7,7 @@ import shutil
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import cv2
 import numpy as np
@@ -22,31 +22,29 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "img_dataset"
 
-# Folder management
+# Output folder management
 OUTPUT_ROOT = PROJECT_ROOT / "generated_datasets"
 OUTPUT_PREFIX = "dataset_cls"
-DATASET_VERSION = "v2"
+DATASET_VERSION = "v3"
 AUTO_NAME_OUTPUT = True
 
-TRAIN_RATIO = 0.80
-VAL_RATIO = 0.10
-TEST_RATIO = 0.10
 SEED = 42
-
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPECIAL_CHAR_FOLDER = "字母和数字标识"
 
-# Final classifier / ROI size
+# Final ROI / model input size
 TARGET_SIZE = 100
 
-# Total versions per source image
-# 1 original resized + (AUG_PER_IMAGE - 1) transformed versions
-AUG_PER_IMAGE = 5
+# REQUIRED BEHAVIOR:
+# each source image creates 5 images in each split
+VERSIONS_PER_SPLIT = {
+    "train": 5,
+    "val": 5,
+    "test": 5,
+}
 
-# Parallelism for character generation
 MAX_WORKERS = max(1, min(8, (os.cpu_count() or 8) - 2))
 
-# Normal class folder -> output class name
 CLASS_NAME_MAP: Dict[str, str] = {
     "A-枪支": "A_gun",
     "B-爆炸物": "B_explosive",
@@ -65,7 +63,6 @@ CLASS_NAME_MAP: Dict[str, str] = {
     "O-摩托车": "O_motorcycle",
 }
 
-# Avoid OpenCV oversubscription
 cv2.setUseOptimized(True)
 cv2.setNumThreads(1)
 
@@ -73,21 +70,14 @@ cv2.setNumThreads(1)
 # =========================================================
 # Folder naming
 # =========================================================
-def split_slug(train_ratio: float, val_ratio: float, test_ratio: float) -> str:
-    return f"{int(round(train_ratio * 100)):02d}{int(round(val_ratio * 100)):02d}{int(round(test_ratio * 100)):02d}"
-
-
 def build_dataset_folder_name() -> str:
-    """
-    Example:
-      dataset_cls__v2__px100__aug5__split801010__seed42
-    """
     return (
         f"{OUTPUT_PREFIX}"
         f"__{DATASET_VERSION}"
         f"__px{TARGET_SIZE}"
-        f"__aug{AUG_PER_IMAGE}"
-        f"__split{split_slug(TRAIN_RATIO, VAL_RATIO, TEST_RATIO)}"
+        f"__tr{VERSIONS_PER_SPLIT['train']}"
+        f"__va{VERSIONS_PER_SPLIT['val']}"
+        f"__te{VERSIONS_PER_SPLIT['test']}"
         f"__seed{SEED}"
     )
 
@@ -151,39 +141,6 @@ def map_char_class_name(img_path: Path) -> str:
     return f"char_{safe_name(img_path.stem)}"
 
 
-def compute_split_counts(n: int) -> Tuple[int, int, int]:
-    if n <= 0:
-        return 0, 0, 0
-    if n == 1:
-        return 1, 0, 0
-    if n == 2:
-        return 1, 1, 0
-
-    n_train = int(round(n * TRAIN_RATIO))
-    n_val = int(round(n * VAL_RATIO))
-    n_test = n - n_train - n_val
-
-    while n_train + n_val + n_test < n:
-        n_train += 1
-    while n_train + n_val + n_test > n:
-        if n_train > 1:
-            n_train -= 1
-        elif n_val > 0:
-            n_val -= 1
-        else:
-            n_test -= 1
-
-    if n >= 3:
-        if n_val == 0 and n_train > 1:
-            n_train -= 1
-            n_val += 1
-        if n_test == 0 and n_train > 1:
-            n_train -= 1
-            n_test += 1
-
-    return n_train, n_val, n_test
-
-
 def ensure_clean_output(out_dir: Path) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -202,11 +159,7 @@ def imread_unicode(path: Path) -> np.ndarray:
 
 def imwrite_unicode(path: Path, img: np.ndarray, jpg_quality: int = 92) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok, buf = cv2.imencode(
-        ".jpg",
-        img,
-        [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality],
-    )
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
     if not ok:
         raise RuntimeError(f"Failed to encode image for: {path}")
     buf.tofile(str(path))
@@ -232,14 +185,13 @@ def resize_to_target_pil(img_pil: Image.Image) -> Image.Image:
 
 
 # =========================================================
-# PyTorch / torchvision-style augmentation
+# Torchvision-style augmentation
 # =========================================================
 def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     rng = random.Random(seed)
 
     img = resize_to_target_pil(base_pil)
 
-    # affine-like variation
     angle = rng.uniform(-15.0, 15.0)
     translate = (
         int(rng.uniform(-0.06, 0.06) * TARGET_SIZE),
@@ -258,7 +210,6 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
         fill=0,
     )
 
-    # brightness / contrast / saturation
     if rng.random() < 0.8:
         img = TF.adjust_brightness(img, rng.uniform(0.88, 1.12))
     if rng.random() < 0.8:
@@ -266,7 +217,6 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     if rng.random() < 0.5:
         img = TF.adjust_saturation(img, rng.uniform(0.9, 1.1))
 
-    # blur
     if rng.random() < 0.5:
         k = rng.choice([3, 5, 7])
         sigma = rng.uniform(0.2, 1.5)
@@ -275,28 +225,34 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     return img
 
 
-def build_versions_from_source(src_path: Path, out_count: int = AUG_PER_IMAGE) -> List[np.ndarray]:
+def build_versions_for_split(src_path: Path, split_name: str, out_count: int) -> List[np.ndarray]:
     """
-    Build:
-      1 original resized
-      + (out_count - 1) torchvision-transformed versions
-    All outputs are TARGET_SIZE x TARGET_SIZE BGR np.ndarray
+    For one source image and one split:
+      - version 0 = original resized
+      - versions 1..N-1 = transformed
+    All outputs are TARGET_SIZE x TARGET_SIZE.
     """
     src_bgr = imread_unicode(src_path)
     base_pil = bgr_to_pil(src_bgr)
 
     versions: List[np.ndarray] = []
 
-    # original resized
-    original = resize_to_target_pil(base_pil)
-    versions.append(pil_to_bgr(original))
+    # split-specific seed offsets
+    split_seed_offset = {
+        "train": 100000,
+        "val": 200000,
+        "test": 300000,
+    }[split_name]
 
-    # transformed variants
-    seed_base = SEED + stable_seed(str(src_path))
-    for i in range(out_count - 1):
-        aug_pil = augment_with_torchvision(base_pil, seed_base + i + 1)
-        aug_pil = resize_to_target_pil(aug_pil)
-        versions.append(pil_to_bgr(aug_pil))
+    base_seed = SEED + stable_seed(str(src_path)) + split_seed_offset
+
+    for i in range(out_count):
+        if i == 0:
+            img_pil = resize_to_target_pil(base_pil)
+        else:
+            img_pil = augment_with_torchvision(base_pil, base_seed + i)
+            img_pil = resize_to_target_pil(img_pil)
+        versions.append(pil_to_bgr(img_pil))
 
     return versions
 
@@ -304,91 +260,89 @@ def build_versions_from_source(src_path: Path, out_count: int = AUG_PER_IMAGE) -
 # =========================================================
 # Dataset builders
 # =========================================================
+def process_source_to_all_splits(src_path: Path, out_class_name: str, source_index: int) -> Dict[str, int]:
+    counts = {"train": 0, "val": 0, "test": 0}
+
+    for split_name in ("train", "val", "test"):
+        out_dir = OUT_DIR / split_name / out_class_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        versions = build_versions_for_split(
+            src_path,
+            split_name=split_name,
+            out_count=VERSIONS_PER_SPLIT[split_name],
+        )
+
+        for j, img in enumerate(versions):
+            dst_path = out_dir / f"{out_class_name}_{source_index:05d}_{split_name}_{j}.jpg"
+            imwrite_unicode(dst_path, img)
+            counts[split_name] += 1
+
+    return counts
+
+
 def process_normal_class(class_dir: Path, out_class_name: str) -> dict:
     """
-    Split FIRST on source images, then expand each source into 5 versions.
-    This avoids leakage of sibling augmentations across train/val/test.
+    Every source image appears in train/val/test.
+    Each split gets 5 versions of that source image.
+    WARNING: this causes split leakage.
     """
     images = list_images(class_dir)
-    rng = random.Random(SEED + stable_seed(out_class_name))
-    rng.shuffle(images)
-
-    n = len(images)
-    n_train, n_val, n_test = compute_split_counts(n)
-
-    groups = {
-        "train": images[:n_train],
-        "val": images[n_train:n_train + n_val],
-        "test": images[n_train + n_val:n_train + n_val + n_test],
-    }
-
     out_counts = {"train": 0, "val": 0, "test": 0}
 
-    total_sources = sum(len(v) for v in groups.values())
-    with tqdm(total=total_sources, desc=f"{out_class_name}", leave=False) as pbar:
-        for split_name, split_paths in groups.items():
-            out_dir = OUT_DIR / split_name / out_class_name
-            out_dir.mkdir(parents=True, exist_ok=True)
+    with tqdm(total=len(images), desc=f"{out_class_name}", leave=False) as pbar:
+        for i, src_path in enumerate(images):
+            counts = process_source_to_all_splits(src_path, out_class_name, i)
+            out_counts["train"] += counts["train"]
+            out_counts["val"] += counts["val"]
+            out_counts["test"] += counts["test"]
+            pbar.update(1)
 
-            for i, src_path in enumerate(split_paths):
-                versions = build_versions_from_source(src_path, out_count=AUG_PER_IMAGE)
-                for j, img in enumerate(versions):
-                    dst_path = out_dir / f"{out_class_name}_{i:05d}_{j}.jpg"
-                    imwrite_unicode(dst_path, img)
-                    out_counts[split_name] += 1
-                pbar.update(1)
+    total_versions_per_source = (
+        VERSIONS_PER_SPLIT["train"] +
+        VERSIONS_PER_SPLIT["val"] +
+        VERSIONS_PER_SPLIT["test"]
+    )
 
     return {
         "class_name": out_class_name,
         "source_name": class_dir.name,
-        "total": n * AUG_PER_IMAGE,
+        "total": len(images) * total_versions_per_source,
         "train": out_counts["train"],
         "val": out_counts["val"],
         "test": out_counts["test"],
-        "warning": None,
+        "warning": (
+            f"{out_class_name}: each source image appears in train/val/test; "
+            f"this causes split leakage and optimistic metrics."
+        ),
     }
 
 
 def process_one_char_image(src_path: Path) -> dict:
     """
-    Keep the special behavior:
-    a one-image class becomes 5 versions total, then split those 5 outputs.
+    Special folder behavior remains:
+    each image becomes its own class, and now that class appears in train/val/test,
+    with 5 versions in each split.
     """
     out_class_name = map_char_class_name(src_path)
-    seed_base = SEED + stable_seed(src_path.stem)
+    counts = process_source_to_all_splits(src_path, out_class_name, 0)
 
-    versions = build_versions_from_source(src_path, out_count=AUG_PER_IMAGE)
-
-    rng = random.Random(seed_base)
-    rng.shuffle(versions)
-
-    n = len(versions)
-    n_train, n_val, n_test = compute_split_counts(n)
-
-    groups = {
-        "train": versions[:n_train],
-        "val": versions[n_train:n_train + n_val],
-        "test": versions[n_train + n_val:n_train + n_val + n_test],
-    }
-
-    for split_name, split_imgs in groups.items():
-        out_dir = OUT_DIR / split_name / out_class_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        for i, img in enumerate(split_imgs):
-            out_path = out_dir / f"{out_class_name}_{i:05d}.jpg"
-            imwrite_unicode(out_path, img)
+    total_versions_per_source = (
+        VERSIONS_PER_SPLIT["train"] +
+        VERSIONS_PER_SPLIT["val"] +
+        VERSIONS_PER_SPLIT["test"]
+    )
 
     return {
         "class_name": out_class_name,
         "source_name": f"{SPECIAL_CHAR_FOLDER}/{src_path.name}",
-        "total": n,
-        "train": len(groups["train"]),
-        "val": len(groups["val"]),
-        "test": len(groups["test"]),
+        "total": total_versions_per_source,
+        "train": counts["train"],
+        "val": counts["val"],
+        "test": counts["test"],
         "warning": (
-            f"{out_class_name}: val/test are transformed variants from one source image only; "
-            f"they measure transform robustness, not true real-world generalization."
+            f"{out_class_name}: one source image is expanded into train/val/test; "
+            f"metrics measure transform robustness, not true generalization."
         ),
     }
 
@@ -426,12 +380,7 @@ def main() -> None:
         "dataset_version": DATASET_VERSION,
         "seed": SEED,
         "target_size": TARGET_SIZE,
-        "aug_per_image": AUG_PER_IMAGE,
-        "splits": {
-            "train_ratio": TRAIN_RATIO,
-            "val_ratio": VAL_RATIO,
-            "test_ratio": TEST_RATIO,
-        },
+        "versions_per_split": VERSIONS_PER_SPLIT,
         "classes": {},
         "totals": {"train": 0, "val": 0, "test": 0, "all": 0},
         "warnings": [],
@@ -445,13 +394,14 @@ def main() -> None:
     print(f"Output dir: {OUT_DIR}")
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
-    print(f"Versions per source image: {AUG_PER_IMAGE}")
+    print(f"Versions per split: {VERSIONS_PER_SPLIT}")
     print("=" * 84)
 
     # Normal classes
     for class_dir in tqdm(normal_class_dirs, desc="Normal classes", leave=True):
         out_class_name = map_normal_class_name(class_dir.name)
         result = process_normal_class(class_dir, out_class_name)
+
         summary["classes"][result["class_name"]] = {
             "source_name": result["source_name"],
             "total": result["total"],
@@ -463,8 +413,10 @@ def main() -> None:
         summary["totals"]["val"] += result["val"]
         summary["totals"]["test"] += result["test"]
         summary["totals"]["all"] += result["total"]
+        if result["warning"]:
+            summary["warnings"].append(result["warning"])
 
-    # Character classes in parallel
+    # Character classes
     char_dir = SRC_DIR / SPECIAL_CHAR_FOLDER
     if char_dir.exists() and char_dir.is_dir():
         char_images = list_images(char_dir)
@@ -501,7 +453,7 @@ def main() -> None:
     print(f"Output dir: {OUT_DIR}")
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
-    print(f"Versions per source image: {AUG_PER_IMAGE}")
+    print(f"Versions per split: {VERSIONS_PER_SPLIT}")
     print("=" * 84)
 
     for cls_name in sorted(summary["classes"].keys()):
