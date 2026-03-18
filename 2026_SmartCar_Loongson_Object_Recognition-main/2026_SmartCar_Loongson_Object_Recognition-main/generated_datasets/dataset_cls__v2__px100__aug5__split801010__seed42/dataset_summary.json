@@ -1,0 +1,274 @@
+{
+  "source_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\img_dataset",
+  "output_root": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\generated_datasets",
+  "output_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\generated_datasets\\dataset_cls__v2__px100__aug5__split801010__seed42",
+  "dataset_folder_name": "dataset_cls__v2__px100__aug5__split801010__seed42",
+  "dataset_version": "v2",
+  "seed": 42,
+  "target_size": 100,
+  "aug_per_image": 5,
+  "splits": {
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1
+  },
+  "classes": {
+    "A_gun": {
+      "source_name": "A-枪支",
+      "total": 975,
+      "train": 780,
+      "val": 100,
+      "test": 95
+    },
+    "B_explosive": {
+      "source_name": "B-爆炸物",
+      "total": 785,
+      "train": 630,
+      "val": 80,
+      "test": 75
+    },
+    "C_dagger": {
+      "source_name": "C-匕首",
+      "total": 780,
+      "train": 625,
+      "val": 80,
+      "test": 75
+    },
+    "D_baton": {
+      "source_name": "D-警棍",
+      "total": 590,
+      "train": 470,
+      "val": 60,
+      "test": 60
+    },
+    "E_fire_axe": {
+      "source_name": "E-消防斧",
+      "total": 640,
+      "train": 510,
+      "val": 65,
+      "test": 65
+    },
+    "F_first_aid_kit": {
+      "source_name": "F-急救包",
+      "total": 785,
+      "train": 630,
+      "val": 80,
+      "test": 75
+    },
+    "G_flashlight": {
+      "source_name": "G-手电筒",
+      "total": 810,
+      "train": 650,
+      "val": 80,
+      "test": 80
+    },
+    "H_walkie_talkie": {
+      "source_name": "H-对讲机",
+      "total": 795,
+      "train": 635,
+      "val": 80,
+      "test": 80
+    },
+    "I_body_armor": {
+      "source_name": "I-防弹背心",
+      "total": 780,
+      "train": 625,
+      "val": 80,
+      "test": 75
+    },
+    "J_binoculars": {
+      "source_name": "J-望远镜",
+      "total": 855,
+      "train": 685,
+      "val": 85,
+      "test": 85
+    },
+    "K_helmet": {
+      "source_name": "K-头盔",
+      "total": 910,
+      "train": 730,
+      "val": 90,
+      "test": 90
+    },
+    "L_fire_truck": {
+      "source_name": "L-消防车",
+      "total": 835,
+      "train": 670,
+      "val": 85,
+      "test": 80
+    },
+    "M_ambulance": {
+      "source_name": "M-救护车",
+      "total": 750,
+      "train": 600,
+      "val": 75,
+      "test": 75
+    },
+    "N_armored_vehicle": {
+      "source_name": "N-装甲车",
+      "total": 650,
+      "train": 520,
+      "val": 65,
+      "test": 65
+    },
+    "O_motorcycle": {
+      "source_name": "O-摩托车",
+      "total": 760,
+      "train": 610,
+      "val": 75,
+      "test": 75
+    },
+    "char_3": {
+      "source_name": "字母和数字标识/3.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_B": {
+      "source_name": "字母和数字标识/B.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_D": {
+      "source_name": "字母和数字标识/D.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_E": {
+      "source_name": "字母和数字标识/E.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_C": {
+      "source_name": "字母和数字标识/C.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_A": {
+      "source_name": "字母和数字标识/A.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_1": {
+      "source_name": "字母和数字标识/1.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_2": {
+      "source_name": "字母和数字标识/2.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_F": {
+      "source_name": "字母和数字标识/F.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_G": {
+      "source_name": "字母和数字标识/G.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_I": {
+      "source_name": "字母和数字标识/I.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_H": {
+      "source_name": "字母和数字标识/H.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_J": {
+      "source_name": "字母和数字标识/J.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_K": {
+      "source_name": "字母和数字标识/K.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_L": {
+      "source_name": "字母和数字标识/L.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_M": {
+      "source_name": "字母和数字标识/M.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_N": {
+      "source_name": "字母和数字标识/N.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    },
+    "char_O": {
+      "source_name": "字母和数字标识/O.jpg",
+      "total": 5,
+      "train": 3,
+      "val": 1,
+      "test": 1
+    }
+  },
+  "totals": {
+    "train": 9424,
+    "val": 1198,
+    "test": 1168,
+    "all": 11790
+  },
+  "warnings": [
+    "char_3: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_B: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_D: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_E: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_C: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_A: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_1: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_2: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_F: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_G: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_I: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_H: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_J: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_K: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_L: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_M: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_N: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization.",
+    "char_O: val/test are transformed variants from one source image only; they measure transform robustness, not true real-world generalization."
+  ]
+}
