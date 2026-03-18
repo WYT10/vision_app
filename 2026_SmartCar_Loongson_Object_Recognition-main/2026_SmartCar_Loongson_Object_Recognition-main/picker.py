@@ -70,5 +70,5 @@ if __name__ == "__main__":
 
 
 '''
-python C:\Users\wongy\Downloads\vision_app\2026_SmartCar_Loongson_Object_Recognition-main\2026_SmartCar_Loongson_Object_Recognition-main\picker.py C:\Users\wongy\Downloads\vision_app\2026_SmartCar_Loongson_Object_Recognition-main\2026_SmartCar_Loongson_Object_Recognition-main\generated_datasets\dataset_cls__v3__px128__tr5__va5__te5__seed42\test --stem-endswith 0 --copy-to C:\Users\wongy\Downloads\vision_app\models\5images
+python C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\picker.py C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\generated_datasets\\dataset_cls__v3__px128__tr5__va5__te5__seed42\\test --stem-endswith 0 --copy-to C:\\Users\\wongy\\Downloads\\vision_app\\models\\5images
 '''
