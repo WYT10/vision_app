@@ -1,6 +1,5 @@
-#include "deploy.hpp"
 
-#include <opencv2/imgproc.hpp>
+#include "deploy.hpp"
 
 namespace vision_app {
 
@@ -15,7 +14,6 @@ bool extract_runtime_rois(const cv::Mat& warped,
         err = "empty warped image or mask";
         return false;
     }
-
     const cv::Rect rr = roi_to_rect(rois.red_roi, warped.size());
     const cv::Rect ir = roi_to_rect(rois.image_roi, warped.size());
     out.red_bgr = warped(rr).clone();

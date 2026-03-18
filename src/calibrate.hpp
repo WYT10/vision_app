@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <algorithm>
@@ -35,16 +36,16 @@ struct RoiConfig { RoiRatio red_roi; RoiRatio image_roi{0.32,0.10,0.50,0.55}; };
 
 struct WarpPackage {
     bool valid = false;
-    cv::Mat H;          // 3x3 CV_64F, source -> warp
-    cv::Mat Hinv;       // 3x3 CV_64F, warp -> source
-    cv::Mat map1;       // remap maps
+    cv::Mat H;
+    cv::Mat Hinv;
+    cv::Mat map1;
     cv::Mat map2;
-    cv::Mat valid_mask; // CV_8UC1
+    cv::Mat valid_mask;
     cv::Size src_size;
     cv::Size warp_size;
     std::string family;
     int id = -1;
-    double tag_fill_ratio = 0.70;
+    int target_tag_px = 128;
 };
 
 inline bool finite_pt(const cv::Point2f& p) {
@@ -153,7 +154,8 @@ inline cv::Rect roi_to_rect(const RoiRatio& rr, const cv::Size& sz) {
 }
 
 inline bool save_rois_yaml(const std::string& path, const RoiConfig& rois) {
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
     cv::FileStorage fs(path, cv::FileStorage::WRITE);
     if (!fs.isOpened()) return false;
     fs << "red_roi" << "{" << "x" << rois.red_roi.x << "y" << rois.red_roi.y << "w" << rois.red_roi.w << "h" << rois.red_roi.h << "}";
@@ -174,12 +176,13 @@ inline bool load_rois_yaml(const std::string& path, RoiConfig& rois) {
     return true;
 }
 
-inline bool build_centered_warp_package_from_detection(const AprilTagDetection& det,
-                                                       const cv::Size& src_size,
-                                                       int canvas_side,
-                                                       double tag_fill_ratio,
-                                                       WarpPackage& pack,
-                                                       std::string& err) {
+inline bool build_centered_warp_package_from_detection_px(const AprilTagDetection& det,
+                                                          const cv::Size& src_size,
+                                                          int canvas_width,
+                                                          int canvas_height,
+                                                          int target_tag_px,
+                                                          WarpPackage& pack,
+                                                          std::string& err) {
     pack = {};
     if (!det.found) { err = "tag not found"; return false; }
     for (const auto& p : det.corners) {
@@ -187,35 +190,36 @@ inline bool build_centered_warp_package_from_detection(const AprilTagDetection& 
     }
     if (quad_area4(det.corners) < 64.0) { err = "tag quadrilateral too small"; return false; }
 
-    int side = std::max(160, canvas_side);
-    side = std::min(side, 1024);
-    const double fill = std::clamp(tag_fill_ratio, 0.25, 0.90);
-    const double inner = static_cast<double>(side) * fill;
-    const double margin = 0.5 * (static_cast<double>(side) - inner);
+    const int W = std::clamp(canvas_width, 64, 2048);
+    const int H = std::clamp(canvas_height, 64, 2048);
+    const int l = std::clamp(target_tag_px, 16, std::min(W, H));
+    const double cx = 0.5 * static_cast<double>(W);
+    const double cy = 0.5 * static_cast<double>(H);
+    const double half = 0.5 * static_cast<double>(l);
 
     std::vector<cv::Point2f> src_quad(4), dst_quad(4);
     for (int i = 0; i < 4; ++i) src_quad[i] = det.corners[i];
-    dst_quad[0] = cv::Point2f(static_cast<float>(margin), static_cast<float>(margin));
-    dst_quad[1] = cv::Point2f(static_cast<float>(margin + inner), static_cast<float>(margin));
-    dst_quad[2] = cv::Point2f(static_cast<float>(margin + inner), static_cast<float>(margin + inner));
-    dst_quad[3] = cv::Point2f(static_cast<float>(margin), static_cast<float>(margin + inner));
+    dst_quad[0] = cv::Point2f(static_cast<float>(cx - half), static_cast<float>(cy - half));
+    dst_quad[1] = cv::Point2f(static_cast<float>(cx + half), static_cast<float>(cy - half));
+    dst_quad[2] = cv::Point2f(static_cast<float>(cx + half), static_cast<float>(cy + half));
+    dst_quad[3] = cv::Point2f(static_cast<float>(cx - half), static_cast<float>(cy + half));
 
-    cv::Mat H = cv::getPerspectiveTransform(src_quad, dst_quad);
-    if (H.empty()) { err = "failed to compute homography"; return false; }
-    cv::Mat Hinv = H.inv();
+    cv::Mat Hm = cv::getPerspectiveTransform(src_quad, dst_quad);
+    if (Hm.empty()) { err = "failed to compute homography"; return false; }
+    cv::Mat Hinv = Hm.inv();
     if (Hinv.empty()) { err = "homography inversion failed"; return false; }
 
-    cv::Mat mapx(side, side, CV_32FC1, cv::Scalar(-1.0f));
-    cv::Mat mapy(side, side, CV_32FC1, cv::Scalar(-1.0f));
-    cv::Mat valid(side, side, CV_8UC1, cv::Scalar(0));
+    cv::Mat mapx(H, W, CV_32FC1, cv::Scalar(-1.0f));
+    cv::Mat mapy(H, W, CV_32FC1, cv::Scalar(-1.0f));
+    cv::Mat valid(H, W, CV_8UC1, cv::Scalar(0));
 
     const cv::Matx33d Hinvx(
         Hinv.at<double>(0,0), Hinv.at<double>(0,1), Hinv.at<double>(0,2),
         Hinv.at<double>(1,0), Hinv.at<double>(1,1), Hinv.at<double>(1,2),
         Hinv.at<double>(2,0), Hinv.at<double>(2,1), Hinv.at<double>(2,2));
 
-    for (int y = 0; y < side; ++y) {
-        for (int x = 0; x < side; ++x) {
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
             const cv::Vec3d v(static_cast<double>(x), static_cast<double>(y), 1.0);
             const cv::Vec3d p = Hinvx * v;
             const double w = p[2];
@@ -237,18 +241,30 @@ inline bool build_centered_warp_package_from_detection(const AprilTagDetection& 
     cv::convertMaps(mapx, mapy, map1, map2, CV_16SC2);
 
     pack.valid = true;
-    pack.H = H;
+    pack.H = Hm;
     pack.Hinv = Hinv;
     pack.map1 = map1;
     pack.map2 = map2;
     pack.valid_mask = valid;
     pack.src_size = src_size;
-    pack.warp_size = {side, side};
+    pack.warp_size = {W, H};
     pack.family = det.family;
     pack.id = det.id;
-    pack.tag_fill_ratio = fill;
+    pack.target_tag_px = l;
     err.clear();
     return true;
+}
+
+inline bool build_centered_warp_package_from_detection(const AprilTagDetection& det,
+                                                       const cv::Size& src_size,
+                                                       int canvas_side,
+                                                       double tag_fill_ratio,
+                                                       WarpPackage& pack,
+                                                       std::string& err) {
+    const int side = std::clamp(canvas_side, 64, 2048);
+    const double fill = std::clamp(tag_fill_ratio, 0.10, 0.95);
+    const int tag_px = std::max(16, static_cast<int>(std::round(side * fill)));
+    return build_centered_warp_package_from_detection_px(det, src_size, side, side, tag_px, pack, err);
 }
 
 inline bool build_warp_package_from_detection(const AprilTagDetection& det,
@@ -257,15 +273,6 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
                                               WarpPackage& pack,
                                               std::string& err) {
     return build_centered_warp_package_from_detection(det, src_size, warp_soft_max, 0.70, pack, err);
-}
-
-inline bool build_warp_package_from_detection(const AprilTagDetection& det,
-                                              const cv::Size& src_size,
-                                              int warp_soft_max,
-                                              double tag_fill_ratio,
-                                              WarpPackage& pack,
-                                              std::string& err) {
-    return build_centered_warp_package_from_detection(det, src_size, warp_soft_max, tag_fill_ratio, pack, err);
 }
 
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {
@@ -278,14 +285,15 @@ inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst
 
 inline bool save_warp_package(const std::string& path, const WarpPackage& pack) {
     if (!pack.valid) return false;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
     cv::FileStorage fs(path, cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
     if (!fs.isOpened()) return false;
     fs << "family" << pack.family;
     fs << "id" << pack.id;
     fs << "src_w" << pack.src_size.width << "src_h" << pack.src_size.height;
     fs << "warp_w" << pack.warp_size.width << "warp_h" << pack.warp_size.height;
-    fs << "tag_fill_ratio" << pack.tag_fill_ratio;
+    fs << "target_tag_px" << pack.target_tag_px;
     fs << "H" << pack.H;
     fs << "Hinv" << pack.Hinv;
     fs << "map1" << pack.map1;
@@ -304,7 +312,7 @@ inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
     fs["id"] >> pack.id;
     fs["src_w"] >> sw; fs["src_h"] >> sh;
     fs["warp_w"] >> ww; fs["warp_h"] >> wh;
-    if (!fs["tag_fill_ratio"].empty()) fs["tag_fill_ratio"] >> pack.tag_fill_ratio;
+    if (!fs["target_tag_px"].empty()) fs["target_tag_px"] >> pack.target_tag_px;
     fs["H"] >> pack.H;
     fs["Hinv"] >> pack.Hinv;
     fs["map1"] >> pack.map1;
@@ -331,18 +339,6 @@ inline void draw_rois(cv::Mat& img, const RoiConfig& rois, int selected) {
     cv::putText(img, "red_roi", rr.tl() + cv::Point(4,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,0,255), 2);
     cv::rectangle(img, ir, selected==1 ? cv::Scalar(255,0,0) : cv::Scalar(180,40,40), 2);
     cv::putText(img, "image_roi", ir.tl() + cv::Point(4,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,0,0), 2);
-}
-
-inline void adjust_roi(RoiRatio& r, int key, double move_step, double size_step) {
-    if (key=='w') r.y -= move_step;
-    if (key=='s') r.y += move_step;
-    if (key=='a') r.x -= move_step;
-    if (key=='d') r.x += move_step;
-    if (key=='j') r.w -= size_step;
-    if (key=='l') r.w += size_step;
-    if (key=='i') r.h -= size_step;
-    if (key=='k') r.h += size_step;
-    r = clamp_roi(r);
 }
 
 } // namespace vision_app
