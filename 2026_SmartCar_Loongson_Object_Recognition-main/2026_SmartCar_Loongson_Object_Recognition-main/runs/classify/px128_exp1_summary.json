@@ -1,0 +1,79 @@
+{
+  "args": {
+    "data": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\generated_datasets\\dataset_cls__v3__px128__tr5__va5__te5__seed42",
+    "model": "yolo26n-cls.pt",
+    "imgsz": 128,
+    "epochs": 30,
+    "batch": 64,
+    "device": "0",
+    "patience": 8,
+    "workers": 8,
+    "project": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify",
+    "name": "px128_exp1",
+    "exist_ok": false,
+    "test_split": "test",
+    "skip_train": false,
+    "skip_export": false,
+    "summary": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1_summary.json"
+  },
+  "train": {
+    "top1": 0.9999151825904846,
+    "top5": 1.0,
+    "fitness": 0.9999575912952423,
+    "speed": {
+      "preprocess": 0.031675496187015255,
+      "inference": 0.06490553857549705,
+      "loss": 0.00012798983373847475,
+      "postprocess": 0.0009034859925742317
+    },
+    "results_dict": {
+      "metrics/accuracy_top1": 0.9999151825904846,
+      "metrics/accuracy_top5": 1.0,
+      "fitness": 0.9999575912952423
+    },
+    "save_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1"
+  },
+  "val": {
+    "top1": 0.9999151825904846,
+    "top5": 1.0,
+    "fitness": 0.9999575912952423,
+    "speed": {
+      "preprocess": 0.035848142463177524,
+      "inference": 0.2970303816971052,
+      "loss": 0.0005649533593771226,
+      "postprocess": 0.0007641051220134899
+    },
+    "results_dict": {
+      "metrics/accuracy_top1": 0.9999151825904846,
+      "metrics/accuracy_top5": 1.0,
+      "fitness": 0.9999575912952423
+    },
+    "save_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\val5"
+  },
+  "test": {
+    "top1": 0.9997455477714539,
+    "top5": 1.0,
+    "fitness": 0.9998727738857269,
+    "speed": {
+      "preprocess": 0.11817990672186908,
+      "inference": 1.060938371479787,
+      "loss": 0.0014769974456147383,
+      "postprocess": 0.003021374075066068
+    },
+    "results_dict": {
+      "metrics/accuracy_top1": 0.9997455477714539,
+      "metrics/accuracy_top5": 1.0,
+      "fitness": 0.9998727738857269
+    },
+    "save_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\val6"
+  },
+  "exports": {
+    "onnx": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1\\weights\\best.onnx",
+    "ncnn": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1\\weights\\best_ncnn_model"
+  },
+  "artifacts": {
+    "best_pt": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1\\weights\\best.pt",
+    "onnx": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1\\weights\\best.onnx",
+    "ncnn": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\runs\\classify\\px128_exp1\\weights\\best_ncnn_model"
+  }
+}
