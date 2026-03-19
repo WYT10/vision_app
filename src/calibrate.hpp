@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <algorithm>
@@ -44,7 +45,7 @@ struct WarpPackage {
     cv::Size warp_size;
     std::string family;
     int id = -1;
-    int target_tag_px = 128;
+    int target_tag_px = 0;
 };
 
 inline bool finite_pt(const cv::Point2f& p) {
@@ -147,14 +148,13 @@ inline cv::Rect roi_to_rect(const RoiRatio& rr, const cv::Size& sz) {
     RoiRatio r = clamp_roi(rr);
     int x = std::clamp(static_cast<int>(std::round(r.x * sz.width)), 0, std::max(0, sz.width - 1));
     int y = std::clamp(static_cast<int>(std::round(r.y * sz.height)), 0, std::max(0, sz.height - 1));
-    int w = std::clamp(static_cast<int>(std::round(r.w * sz.width)), 1, sz.width - x);
-    int h = std::clamp(static_cast<int>(std::round(r.h * sz.height)), 1, sz.height - y);
-    return {x,y,w,h};
+    int w = std::clamp(static_cast<int>(std::round(r.w * sz.width)), 1, std::max(1, sz.width - x));
+    int h = std::clamp(static_cast<int>(std::round(r.h * sz.height)), 1, std::max(1, sz.height - y));
+    return {x, y, w, h};
 }
 
 inline bool save_rois_yaml(const std::string& path, const RoiConfig& rois) {
-    auto parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty()) std::filesystem::create_directories(parent);
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     cv::FileStorage fs(path, cv::FileStorage::WRITE);
     if (!fs.isOpened()) return false;
     fs << "red_roi" << "{" << "x" << rois.red_roi.x << "y" << rois.red_roi.y << "w" << rois.red_roi.w << "h" << rois.red_roi.h << "}";
@@ -177,8 +177,8 @@ inline bool load_rois_yaml(const std::string& path, RoiConfig& rois) {
 
 inline bool build_centered_warp_package_from_detection_px(const AprilTagDetection& det,
                                                           const cv::Size& src_size,
-                                                          int warp_width,
-                                                          int warp_height,
+                                                          int canvas_width,
+                                                          int canvas_height,
                                                           int target_tag_px,
                                                           WarpPackage& pack,
                                                           std::string& err) {
@@ -189,19 +189,19 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
     }
     if (quad_area4(det.corners) < 64.0) { err = "tag quadrilateral too small"; return false; }
 
-    const int W = std::clamp(warp_width, 64, 4096);
-    const int H = std::clamp(warp_height, 64, 4096);
-    const int L = std::clamp(target_tag_px, 8, std::min(W, H));
+    int W = std::clamp(canvas_width, 128, 2048);
+    int H = std::clamp(canvas_height, 128, 2048);
+    int L = std::clamp(target_tag_px, 16, std::min(W, H) - 2);
     const double cx = 0.5 * static_cast<double>(W);
     const double cy = 0.5 * static_cast<double>(H);
-    const double hL = 0.5 * static_cast<double>(L);
+    const double half = 0.5 * static_cast<double>(L);
 
     std::vector<cv::Point2f> src_quad(4), dst_quad(4);
     for (int i = 0; i < 4; ++i) src_quad[i] = det.corners[i];
-    dst_quad[0] = cv::Point2f(static_cast<float>(cx - hL), static_cast<float>(cy - hL));
-    dst_quad[1] = cv::Point2f(static_cast<float>(cx + hL), static_cast<float>(cy - hL));
-    dst_quad[2] = cv::Point2f(static_cast<float>(cx + hL), static_cast<float>(cy + hL));
-    dst_quad[3] = cv::Point2f(static_cast<float>(cx - hL), static_cast<float>(cy + hL));
+    dst_quad[0] = cv::Point2f(static_cast<float>(cx - half), static_cast<float>(cy - half));
+    dst_quad[1] = cv::Point2f(static_cast<float>(cx + half), static_cast<float>(cy - half));
+    dst_quad[2] = cv::Point2f(static_cast<float>(cx + half), static_cast<float>(cy + half));
+    dst_quad[3] = cv::Point2f(static_cast<float>(cx - half), static_cast<float>(cy + half));
 
     cv::Mat Hm = cv::getPerspectiveTransform(src_quad, dst_quad);
     if (Hm.empty()) { err = "failed to compute homography"; return false; }
@@ -225,25 +225,19 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
             if (!std::isfinite(w) || std::abs(w) < 1e-12) continue;
             const double sx = p[0] / w;
             const double sy = p[1] / w;
-            if (std::isfinite(sx) && std::isfinite(sy) &&
-                sx >= 0.0 && sy >= 0.0 &&
-                sx < static_cast<double>(src_size.width) &&
-                sy < static_cast<double>(src_size.height)) {
-                mapx.at<float>(y,x) = static_cast<float>(sx);
-                mapy.at<float>(y,x) = static_cast<float>(sy);
-                valid.at<unsigned char>(y,x) = 255;
+            if (sx >= 0.0 && sy >= 0.0 && sx < src_size.width && sy < src_size.height) {
+                mapx.at<float>(y, x) = static_cast<float>(sx);
+                mapy.at<float>(y, x) = static_cast<float>(sy);
+                valid.at<uchar>(y, x) = 255;
             }
         }
     }
 
-    cv::Mat map1, map2;
-    cv::convertMaps(mapx, mapy, map1, map2, CV_16SC2);
-
     pack.valid = true;
     pack.H = Hm;
     pack.Hinv = Hinv;
-    pack.map1 = map1;
-    pack.map2 = map2;
+    pack.map1 = mapx;
+    pack.map2 = mapy;
     pack.valid_mask = valid;
     pack.src_size = src_size;
     pack.warp_size = {W, H};
@@ -254,9 +248,18 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
     return true;
 }
 
+inline bool build_warp_package_from_detection(const AprilTagDetection& det,
+                                              const cv::Size& src_size,
+                                              int warp_width,
+                                              int warp_height,
+                                              int target_tag_px,
+                                              WarpPackage& pack,
+                                              std::string& err) {
+    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height, target_tag_px, pack, err);
+}
+
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {
     if (!pack.valid || src.empty()) return false;
-    if (pack.src_size.width > 0 && pack.src_size.height > 0 && src.size() != pack.src_size) return false;
     cv::remap(src, dst, pack.map1, pack.map2, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255,255,255));
     if (dst.empty()) return false;
     if (out_valid) *out_valid = pack.valid_mask;
@@ -265,8 +268,7 @@ inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst
 
 inline bool save_warp_package(const std::string& path, const WarpPackage& pack) {
     if (!pack.valid) return false;
-    auto parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty()) std::filesystem::create_directories(parent);
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     cv::FileStorage fs(path, cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
     if (!fs.isOpened()) return false;
     fs << "family" << pack.family;
@@ -287,12 +289,12 @@ inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
     cv::FileStorage fs(path, cv::FileStorage::READ);
     if (!fs.isOpened()) return false;
     pack = {};
-    int sw=0, sh=0, ww=0, wh=0, tag_px = 0;
+    int sw=0, sh=0, ww=0, wh=0;
     fs["family"] >> pack.family;
     fs["id"] >> pack.id;
     fs["src_w"] >> sw; fs["src_h"] >> sh;
     fs["warp_w"] >> ww; fs["warp_h"] >> wh;
-    if (!fs["target_tag_px"].empty()) fs["target_tag_px"] >> tag_px;
+    if (!fs["target_tag_px"].empty()) fs["target_tag_px"] >> pack.target_tag_px;
     fs["H"] >> pack.H;
     fs["Hinv"] >> pack.Hinv;
     fs["map1"] >> pack.map1;
@@ -300,7 +302,6 @@ inline bool load_warp_package(const std::string& path, WarpPackage& pack) {
     fs["valid_mask"] >> pack.valid_mask;
     pack.src_size = {sw, sh};
     pack.warp_size = {ww, wh};
-    pack.target_tag_px = tag_px > 0 ? tag_px : 128;
     pack.valid = !pack.map1.empty() && !pack.valid_mask.empty();
     return pack.valid;
 }

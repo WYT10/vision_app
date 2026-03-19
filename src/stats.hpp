@@ -3,7 +3,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <string>
 
 #include "camera.hpp"

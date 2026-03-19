@@ -1,45 +1,20 @@
-# vision_app working drop-in
 
-This drop-in keeps the existing camera + AprilTag + ROI workflow and replaces the old model stub with the proven ONNX Runtime / NCNN classifier runtime.
+# vision_app
 
-## What changed
+Ready-to-run drop-in build for:
+- `probe`
+- `calibrate`
+- `deploy`
 
-- keeps the runtime app focused on three modes:
-  - `probe`
-  - `calibrate`
-  - `deploy`
-- uses explicit calibration knobs:
-  - `--warp-width`
-  - `--warp-height`
-  - `--target-tag-px`
-- integrates the working classifier backends from the standalone benchmark helpers:
-  - ONNX Runtime
-  - NCNN
-- removes the old OpenCV DNN ONNX stub and the fake NCNN hook
-- adds deploy warnings when the live camera mode does not match the saved calibration source size
+This version keeps:
+- camera probing and FPS benchmarking helpers
+- AprilTag calibration UI and ROI editing
+- ONNX Runtime classifier backend
+- NCNN classifier backend
+- separate testing toggles for `red_roi`, `image_roi`, and model inference
+- prediction rate limiting with `--model-max-hz`
 
-The standalone classifier helpers you shared already support repeated latency and report generation, and they show the same ONNX/NCNN runtime pattern this app now uses. fileciteturn26file1 fileciteturn26file2 fileciteturn26file3
-
-## Files in this drop-in
-
-Replace your project with these files/folders:
-
-- `src/main.c`
-- `src/camera.hpp`
-- `src/calibrate.hpp`
-- `src/deploy.hpp`
-- `src/roi_helper.cpp`
-- `src/model.hpp`
-- `src/model.cpp`
-- `src/classifier_common.hpp`
-- `src/onnx_classifier.hpp`
-- `src/ncnn_classifier.hpp`
-- `src/stats.hpp`
-- `cmake/FindONNXRuntime.cmake`
-- `CMakeLists.txt`
-- `README.md`
-
-## Pull latest repo first
+## Pull latest project
 
 ```bash
 git pull https://github.com/WYT10/vision_app.git main
@@ -61,72 +36,61 @@ make -j$(nproc)
 ## Modes
 
 ### 1) Probe
-
-Probe supported camera formats and run a short real FPS test.
+Show supported camera modes from `v4l2-ctl`:
 
 ```bash
-./vision_app --mode probe \
-  --device /dev/video0 \
-  --width 640 --height 480 --fourcc MJPG --fps 120 \
-  --duration 5
+./vision_app --mode probe --device /dev/video0
 ```
 
 ### 2) Calibrate
+Open the camera, detect the AprilTag, and map the 4 detected tag corners to a centered
+`target_tag_px x target_tag_px` square inside the warped canvas `warp_width x warp_height`.
 
-Detect the AprilTag, map it to a centered `target_tag_px x target_tag_px` square inside `warp_width x warp_height`, tune ROIs, then save warp and ROI config.
+Use the UI to:
+- lock/unlock
+- move/resize `red_roi`
+- move/resize `image_roi`
+- save warp / save rois / save all
+
+Example:
 
 ```bash
-./vision_app --mode calibrate \
+./vision_app \
+  --mode calibrate \
   --device /dev/video0 \
-  --width 640 --height 480 --fourcc MJPG --fps 120 \
-  --tag-family auto --target-id 0 \
+  --width 160 --height 120 --fourcc MJPG --fps 120 \
   --warp-width 384 --warp-height 384 \
   --target-tag-px 128 \
+  --tag-family auto --target-id 0 \
   --save-warp ../report/warp_package.yml.gz \
-  --save-rois ../report/rois.yml \
-  --save-report ../report/latest_report.md
+  --save-rois ../report/rois.yml
 ```
 
 Controls:
 - `SPACE` / `ENTER`: lock current tag
 - `u`: unlock
-- `1` / `2`: select red ROI / image ROI
+- `1` / `2`: select `red_roi` / `image_roi`
 - `w a s d`: move ROI
-- `i k j l`: resize ROI
-- `[` `]` `,` `.`: step size tuning
-- `o`: save ROIs
-- `y`: save warp
+- `i / k`: height - / +
+- `j / l`: width - / +
+- `[` / `]`: move step down / up
+- `,` / `.`: size step down / up
 - `p`: save all
+- `y`: save warp only
+- `o`: save rois only
+- `r`: reset rois
 - `q` / `ESC`: quit
 
 ### 3) Deploy
+Load saved warp + rois, compute `red_roi`, crop `image_roi`, and optionally classify with ONNX or NCNN.
 
-Load the saved warp + ROIs, compute the red ROI ratio, crop the image ROI, and run classification.
-
-#### ONNX
-
-```bash
-./vision_app --mode deploy \
-  --device /dev/video0 \
-  --width 640 --height 480 --fourcc MJPG --fps 120 \
-  --load-warp ../report/warp_package.yml.gz \
-  --load-rois ../report/rois.yml \
-  --model-enable 1 \
-  --model-backend onnx \
-  --model-onnx-path ../models/best.onnx \
-  --model-labels-path ../models/labels.txt \
-  --model-input-width 128 --model-input-height 128 \
-  --model-preprocess crop \
-  --model-threads 4 \
-  --model-stride 1
-```
-
-#### NCNN
+#### NCNN deploy example
 
 ```bash
-./vision_app --mode deploy \
+./vision_app \
+  --mode deploy \
   --device /dev/video0 \
-  --width 640 --height 480 --fourcc MJPG --fps 120 \
+  --width 160 --height 120 --fourcc MJPG --fps 120 \
   --load-warp ../report/warp_package.yml.gz \
   --load-rois ../report/rois.yml \
   --model-enable 1 \
@@ -137,40 +101,108 @@ Load the saved warp + ROIs, compute the red ROI ratio, crop the image ROI, and r
   --model-input-width 128 --model-input-height 128 \
   --model-preprocess crop \
   --model-threads 4 \
-  --model-stride 1
+  --model-stride 1 \
+  --model-max-hz 5.0
 ```
 
-## Important notes
+#### ONNX deploy example
 
-### Match deploy camera mode to calibration camera mode
+```bash
+./vision_app \
+  --mode deploy \
+  --device /dev/video0 \
+  --width 160 --height 120 --fourcc MJPG --fps 120 \
+  --load-warp ../report/warp_package.yml.gz \
+  --load-rois ../report/rois.yml \
+  --model-enable 1 \
+  --model-backend onnx \
+  --model-onnx-path ../models/best.onnx \
+  --model-labels-path ../models/labels.txt \
+  --model-input-width 128 --model-input-height 128 \
+  --model-preprocess crop \
+  --model-threads 4 \
+  --model-stride 1 \
+  --model-max-hz 5.0
+```
 
-The saved warp package stores the original calibration source size. If deploy opens the camera with a different width/height, the app now warns you because the warp may no longer match.
+## Separate testing in deploy
 
-### ROI size should match model input size
+You can test the three subsystems separately:
 
-The cleanest setup is:
+### Red ROI only
+```bash
+./vision_app --mode deploy ... --run-red 1 --run-image-roi 0 --run-model 0
+```
 
-- `target_tag_px` chosen during calibration
-- ROI tuned in warped space
-- `image_roi` content naturally lands at the same scale the classifier expects
-- model input size matches the training/deploy size
+### Image ROI capture only
+```bash
+./vision_app --mode deploy ... --run-red 0 --run-image-roi 1 --run-model 0 \
+  --save-image-roi-dir ../captures/image_roi --save-every-n 10
+```
 
-### Current benchmark observation
+### Full classification
+```bash
+./vision_app --mode deploy ... --run-red 1 --run-image-roi 1 --run-model 1
+```
 
-From your Pi tests on the standalone classifier, NCNN is already faster than ONNX at `128x128` for the same image:
-- ONNX: ~34 ms/img
-- NCNN: ~13 ms/img
+## Notes
 
-So NCNN should be your default deploy backend on Pi unless you specifically need ONNX parity/debug.
+- Keep the **same camera mode** between calibration and deploy.
+- The saved warp package stores the original calibration source size. If deploy uses a different camera size,
+  the app prints a warning because the remap no longer matches the original geometry.
+- `image_roi` should ideally match the model input size used during training.
+- Use NCNN as the default deploy backend on Pi; keep ONNX for parity/debug.
 
-## Model reference
+## Example config (`vision_app.conf`)
 
-The working classifier pieces in this drop-in are based on the standalone runtime you shared:
-- shared preprocessing and label handling in `classifier_common.hpp` fileciteturn26file0
-- ONNX Runtime classifier with quiet load behavior in `onnx_classifier.hpp` fileciteturn26file3
-- NCNN classifier with robust input/output blob detection in `ncnn_classifier.hpp` fileciteturn26file2
-- matching build logic in the standalone CMake file fileciteturn26file5
+```ini
+mode=deploy
+device=/dev/video0
+width=160
+height=120
+fps=120
+fourcc=MJPG
+ui=1
 
-## Dataset note
+warp_width=384
+warp_height=384
+target_tag_px=128
+tag_family=auto
+target_id=0
+manual_lock_only=1
+lock_frames=4
 
-The standalone benchmark helpers work directly on the `dataset_cls/train`, `dataset_cls/val`, and `dataset_cls/test` folder structure without a YAML file, using the parent folder name as ground truth. fileciteturn26file4
+save_warp=../report/warp_package.yml.gz
+load_warp=../report/warp_package.yml.gz
+save_rois=../report/rois.yml
+load_rois=../report/rois.yml
+save_report=../report/latest_report.md
+
+red_roi=0.08,0.08,0.18,0.18
+image_roi=0.32,0.10,0.50,0.55
+
+red_h1_low=0
+red_h1_high=10
+red_h2_low=170
+red_h2_high=180
+red_s_min=80
+red_v_min=60
+
+model_enable=1
+model_backend=ncnn
+model_ncnn_param_path=../models/model.ncnn.param
+model_ncnn_bin_path=../models/model.ncnn.bin
+model_labels_path=../models/labels.txt
+model_input_width=128
+model_input_height=128
+model_preprocess=crop
+model_threads=4
+model_stride=1
+model_max_hz=5.0
+model_topk=5
+
+run_red=1
+run_image_roi=1
+run_model=1
+save_every_n=0
+```
