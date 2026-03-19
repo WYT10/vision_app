@@ -72,6 +72,7 @@ struct AppOptions {
     bool latest_only = true;
     int drain_grabs = 1;
     bool headless = false;
+    bool draw_text = true;
     int duration = 10;
 
     int camera_soft_max = 1000;
@@ -99,7 +100,6 @@ struct AppOptions {
     RoiConfig default_rois;
     RedThresholdConfig red_cfg;
     ModelConfig model_cfg;
-    bool overlay_text = true;
 };
 
 inline void print_live_controls() {
@@ -144,9 +144,9 @@ inline void print_status_to_terminal(int,
                                      const RoiRuntimeData*,
                                      const ModelResult*) {}
 
-inline cv::Mat make_blank_preview(int side, const std::string& text, bool overlay_text = true) {
+inline cv::Mat make_blank_preview(int side, const std::string& text, bool draw_text) {
     cv::Mat img(std::max(64, side), std::max(64, side), CV_8UC3, cv::Scalar(235,235,235));
-    if (overlay_text) {
+    if (draw_text && !text.empty()) {
         cv::putText(img, text, {16, img.rows / 2}, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(60,60,60), 2);
     }
     return img;
@@ -243,7 +243,7 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
 
             camera_show = frame.clone();
             draw_detection_overlay(camera_show, cur);
-            if (opt.overlay_text) {
+            if (opt.draw_text) {
                 cv::putText(camera_show,
                             cur.found ? "SEARCH: centered live warp in other window" : "SEARCH: no tag",
                             {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.62, cv::Scalar(0,255,255), 2);
@@ -257,13 +257,13 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
                     const cv::Rect ir = roi_to_rect(rois.image_roi, temp_preview.size());
                     cv::rectangle(temp_preview, rr, cv::Scalar(0,0,255), 2);
                     cv::rectangle(temp_preview, ir, cv::Scalar(255,0,0), 2);
-                    if (opt.overlay_text) {
+                    if (opt.draw_text) {
                         cv::putText(temp_preview, "LIVE centered warp preview", {12, 24}, cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(0, 100, 0), 2);
                     }
                 }
             }
             if (temp_preview.empty()) {
-                warp_show = make_blank_preview(opt.temp_preview_square, "waiting for tag", opt.overlay_text);
+                warp_show = make_blank_preview(opt.temp_preview_square, "waiting for tag", opt.draw_text);
             } else {
                 warp_show = temp_preview.clone();
             }
@@ -276,14 +276,14 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
             }
             camera_show = frame.clone();
             draw_detection_overlay(camera_show, locked_det);
-            if (opt.overlay_text) {
+            if (opt.draw_text) {
                 cv::putText(camera_show, "LOCKED", {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.62, cv::Scalar(0,255,0), 2);
             }
             camera_show = downscale_for_preview(camera_show, opt.camera_preview_max);
 
             warp_show = warped.clone();
             draw_rois(warp_show, rois, selected);
-            if (opt.overlay_text) {
+            if (opt.draw_text) {
                 cv::putText(warp_show,
                             "LOCKED centered warp family=" + locked_pack.family + " id=" + std::to_string(locked_pack.id),
                             {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.60, cv::Scalar(0,120,0), 2);
@@ -299,11 +299,13 @@ inline bool run_live(const AppOptions& opt, std::string& err) {
                         model_res.summary = "model err";
                     }
                 }
-                if (opt.overlay_text) {
+                if (opt.draw_text) {
                     cv::putText(warp_show,
                                 "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5),
                                 {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,120,0), 2);
-                    if (model_res.ran) {
+                }
+                if (model_res.ran) {
+                    if (opt.draw_text) {
                         cv::putText(warp_show, model_res.summary, {12, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.48, cv::Scalar(0,120,0), 1);
                     }
                 }
@@ -428,18 +430,18 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         camera_show = downscale_for_preview(frame, opt.camera_preview_max);
         warp_show = warped.clone();
         draw_rois(warp_show, rois, -1);
-        if (opt.overlay_text) {
+        if (opt.draw_text) {
             cv::putText(warp_show, "DEPLOY family=" + pack.family + " id=" + std::to_string(pack.id), {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.68, cv::Scalar(0,120,0), 2);
         }
         std::string rerr;
         if (extract_runtime_rois(warped, valid, rois, opt.red_cfg, roi_info, rerr)) {
-            if (opt.overlay_text) {
+            if (opt.draw_text) {
                 cv::putText(warp_show, "red_ratio=" + std::to_string(roi_info.red_ratio).substr(0,5), {12, 56}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,120,0), 2);
             }
             if (model_ready && (frame_idx % std::max(1, opt.model_cfg.stride) == 0)) {
                 std::string merr;
                 if (run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
-                    if (opt.overlay_text) {
+                    if (opt.draw_text) {
                         cv::putText(warp_show, model_res.summary, {12, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,120,0), 1);
                     }
                 }

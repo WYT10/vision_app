@@ -50,6 +50,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "latest_only") o.latest_only = parse_bool(v);
         else if (k == "drain_grabs") o.drain_grabs = std::stoi(v);
         else if (k == "headless") o.headless = parse_bool(v);
+        else if (k == "draw_text") o.draw_text = parse_bool(v);
         else if (k == "duration") o.duration = std::stoi(v);
         else if (k == "camera_soft_max") o.camera_soft_max = std::stoi(v);
         else if (k == "warp_soft_max") o.warp_soft_max = std::stoi(v);
@@ -84,7 +85,6 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "model_input_width") o.model_cfg.input_width = std::stoi(v);
         else if (k == "model_input_height") o.model_cfg.input_height = std::stoi(v);
         else if (k == "model_stride") o.model_cfg.stride = std::stoi(v);
-        else if (k == "overlay_text") o.overlay_text = parse_bool(v);
     }
 }
 
@@ -105,6 +105,7 @@ static void print_help() {
         << "  --latest-only 1\n"
         << "  --drain-grabs 1\n"
         << "  --headless 1\n"
+        << "  --draw-text 1\n"
         << "  --duration 10\n\n"
         << "Preview / safety\n"
         << "  --camera-soft-max 1000\n"
@@ -134,8 +135,7 @@ static void print_help() {
         << "  --model-backend onnx|ncnn\n"
         << "  --model-path ../models/model.onnx\n"
         << "  --model-input-width 224 --model-input-height 224\n"
-        << "  --model-stride 5\n"
-        << "  --overlay-text 1   # draw text overlays on preview images\n\n"
+        << "  --model-stride 5\n\n"
         << "Save / load\n"
         << "  --save-warp PATH   --load-warp PATH\n"
         << "  --save-rois PATH   --load-rois PATH\n"
@@ -144,7 +144,7 @@ static void print_help() {
         << "  ./vision_app --mode probe\n"
         << "  ./vision_app --mode bench --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --buffer-size 1 --latest-only 1 --drain-grabs 1 --headless 1 --duration 10\n"
         << "  ./vision_app --mode live --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 120 --buffer-size 1 --latest-only 1 --drain-grabs 1 --tag-family auto --target-id 0 --manual-lock-only 1 --tag-fill-ratio 0.70 --camera-preview-max 700 --warp-preview-max 700\n"
-        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend onnx --model-path ../models/model.onnx --overlay-text 0\n";
+        << "  ./vision_app --mode deploy --device /dev/video0 --width 640 --height 480 --fourcc MJPG --fps 180 --draw-text 0 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend onnx --model-path ../models/model.onnx\n";
 }
 
 int main(int argc, char** argv) {
@@ -168,6 +168,7 @@ int main(int argc, char** argv) {
         else if (a == "--latest-only") opt.latest_only = parse_bool(need("--latest-only"));
         else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need("--drain-grabs"));
         else if (a == "--headless") opt.headless = parse_bool(need("--headless"));
+        else if (a == "--draw-text") opt.draw_text = parse_bool(need("--draw-text"));
         else if (a == "--duration") opt.duration = std::stoi(need("--duration"));
         else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need("--camera-soft-max"));
         else if (a == "--warp-soft-max") opt.warp_soft_max = std::stoi(need("--warp-soft-max"));
@@ -202,7 +203,6 @@ int main(int argc, char** argv) {
         else if (a == "--model-input-width") opt.model_cfg.input_width = std::stoi(need("--model-input-width"));
         else if (a == "--model-input-height") opt.model_cfg.input_height = std::stoi(need("--model-input-height"));
         else if (a == "--model-stride") opt.model_cfg.stride = std::stoi(need("--model-stride"));
-        else if (a == "--overlay-text") opt.overlay_text = parse_bool(need("--overlay-text"));
         else { std::cerr << "unknown argument: " << a << "\n"; return 1; }
     }
 
