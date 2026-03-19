@@ -1,0 +1,14 @@
+{
+  "results": [
+    {
+      "width": 160,
+      "height": 120,
+      "fourcc": "MJPG",
+      "fps_req": 120,
+      "opened": true,
+      "fps_measured": 113.91123507447382,
+      "actual_width": 160,
+      "actual_height": 120
+    }
+  ]
+}
