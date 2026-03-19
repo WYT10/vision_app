@@ -52,6 +52,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "latest_only") o.latest_only = parse_bool(v);
         else if (k == "drain_grabs") o.drain_grabs = std::stoi(v);
         else if (k == "ui") o.ui = parse_bool(v);
+        else if (k == "draw_overlay") o.draw_overlay = parse_bool(v);
         else if (k == "duration") o.duration = std::stoi(v);
 
         else if (k == "camera_soft_max") o.camera_soft_max = std::stoi(v);
@@ -128,6 +129,7 @@ Core args:
   --device /dev/video0
   --width 640 --height 480 --fourcc MJPG --fps 120
   --ui 1
+  --draw-overlay 1
   --duration 10
 
 Calibration args:
@@ -210,6 +212,7 @@ int main(int argc, char** argv) {
             else if (a == "--latest-only") opt.latest_only = parse_bool(need(i, "--latest-only"));
             else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need(i, "--drain-grabs"));
             else if (a == "--ui") opt.ui = parse_bool(need(i, "--ui"));
+            else if (a == "--draw-overlay") opt.draw_overlay = parse_bool(need(i, "--draw-overlay"));
             else if (a == "--duration") opt.duration = std::stoi(need(i, "--duration"));
 
             else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need(i, "--camera-soft-max"));
