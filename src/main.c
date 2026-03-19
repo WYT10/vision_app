@@ -128,6 +128,7 @@ Core args:
   --device /dev/video0
   --width 640 --height 480 --fourcc MJPG --fps 120
   --ui 1
+  --overlay-text 1
   --duration 10
 
 Calibration args:
@@ -180,6 +181,7 @@ int main(int argc, char** argv) {
     opt.height = 120;
     opt.fps = 120;
     opt.fourcc = "MJPG";
+  opt.overlay_text = true;
     opt.model_max_hz = 5.0;
     std::string config_path = "vision_app.conf";
 
@@ -210,6 +212,7 @@ int main(int argc, char** argv) {
             else if (a == "--latest-only") opt.latest_only = parse_bool(need(i, "--latest-only"));
             else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need(i, "--drain-grabs"));
             else if (a == "--ui") opt.ui = parse_bool(need(i, "--ui"));
+            else if (a == "--overlay-text") opt.overlay_text = (std::stoi(need(i, "--overlay-text")) != 0);
             else if (a == "--duration") opt.duration = std::stoi(need(i, "--duration"));
 
             else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need(i, "--camera-soft-max"));
