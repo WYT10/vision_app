@@ -33,7 +33,7 @@ IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPECIAL_CHAR_FOLDER = "字母和数字标识"
 
 # Final ROI / model input size
-TARGET_SIZE = 128
+TARGET_SIZE = 60
 
 # REQUIRED BEHAVIOR:
 # each source image creates 5 images in each split

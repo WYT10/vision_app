@@ -105,6 +105,16 @@ Image ROI capture only:
 python vision_app_py.py --mode deploy ... --run-red 0 --run-image-roi 1 --run-model 0 --save-image-roi-dir ./roi_dump --save-every-n 10
 ```
 
+Save full frames (choose warped or original camera):
+
+```bash
+# default is warped
+python vision_app_py.py --mode deploy ... --save-warped-dir ./frame_dump --save-every-n 10
+
+# save original camera frame instead of warped frame
+python vision_app_py.py --mode deploy ... --save-warped-dir ./frame_dump --save-frame-source camera --save-every-n 10
+```
+
 Model only on live ROI:
 
 ```bash

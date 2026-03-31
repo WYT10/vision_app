@@ -334,11 +334,11 @@ def save_cfg(path: str, cfg: WarpConfig):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-def save_warped_image(save_dir: str, frame_idx: int, warped: np.ndarray):
+def save_frame_image(save_dir: str, frame_idx: int, image: np.ndarray, prefix: str = "frame"):
     if not save_dir:
         return
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(Path(save_dir) / f"warped_{frame_idx:06d}.jpg"), warped)
+    cv2.imwrite(str(Path(save_dir) / f"{prefix}_{frame_idx:06d}.jpg"), image)
 
 def load_cfg(path: str) -> WarpConfig:
     return WarpConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
@@ -491,7 +491,11 @@ def mode_deploy(args):
         t3 = time.perf_counter()
         if args.save_every_n > 0 and frame_idx % args.save_every_n == 0:
             # Save raw warped frame before any UI drawing overlays are added.
-            if args.save_warped_dir: save_warped_image(args.save_warped_dir, frame_idx, warped)
+            if args.save_warped_dir:
+                if args.save_frame_source == "camera":
+                    save_frame_image(args.save_warped_dir, frame_idx, frame, "camera")
+                else:
+                    save_frame_image(args.save_warped_dir, frame_idx, warped, "warped")
             if args.save_image_roi_dir and args.run_image_roi: cv2.imwrite(str(Path(args.save_image_roi_dir) / f"image_roi_{frame_idx:06d}.jpg"), image_roi)
             if args.save_red_roi_dir and args.run_red: cv2.imwrite(str(Path(args.save_red_roi_dir) / f"red_roi_{frame_idx:06d}.jpg"), red_roi)
         run_model_now = args.run_model and clf is not None and ((args.model_stride <= 1) or (frame_idx % args.model_stride == 0)) and (pred_every <= 0 or (time.perf_counter() - last_pred_t) >= pred_every)
@@ -562,6 +566,7 @@ def make_parser():
     p.add_argument("--save-image-roi-dir", default="")
     p.add_argument("--save-red-roi-dir", default="")
     p.add_argument("--save-warped-dir", default="")
+    p.add_argument("--save-frame-source", default="warped", choices=["warped", "camera"])
     p.add_argument("--save-every-n", type=int, default=0)
     p.add_argument("--model-enable", type=int, default=0)
     p.add_argument("--model-backend", default="ncnn", choices=["onnx", "ncnn"])
