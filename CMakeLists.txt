@@ -14,11 +14,11 @@ find_package(ncnn)
 find_package(OpenMP)
 
 add_executable(vision_app
-    src/main.c
+    src/main.cpp
     src/roi_helper.cpp
     src/model.cpp
 )
-set_source_files_properties(src/main.c PROPERTIES LANGUAGE CXX)
+set_source_files_properties(src/main.cpp PROPERTIES LANGUAGE CXX)
 
 target_include_directories(vision_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

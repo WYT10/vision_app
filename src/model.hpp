@@ -1,4 +1,3 @@
-
 #pragma once
 #include <string>
 #include "calibrate.hpp"
@@ -40,9 +39,22 @@ struct RoiRuntimeData {
     cv::Mat red_mask;
     cv::Mat image_bgr;
     cv::Mat image_mask;
+    cv::Mat red_mask_vis;
+
+    std::string runtime_mode = "fixed";
+    cv::Rect fixed_red_rect;
+    cv::Rect fixed_image_rect;
+    cv::Rect dynamic_search_rect;
+    cv::Rect dynamic_image_rect;
+
     double red_ratio = 0.0;
     int red_valid_pixels = 0;
     int image_valid_pixels = 0;
+    int red_center_x = -1;
+    int red_blob_area = 0;
+    bool red_found = false;
+    bool used_last_center = false;
+    bool used_fallback_center = false;
 };
 
 bool init_model_runtime(const ModelConfig& cfg, std::string& err);

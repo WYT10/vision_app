@@ -1,13 +1,16 @@
-
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 
+#include <opencv2/imgcodecs.hpp>
+
 #include "deploy.hpp"
 
 using namespace vision_app;
+namespace fs = std::filesystem;
 
 static std::string trim(const std::string& s) {
     size_t a = 0;
@@ -22,10 +25,16 @@ static bool parse_bool(const std::string& v) {
 }
 
 static bool parse_roi_csv(const std::string& s, RoiRatio& r) {
-    std::stringstream ss(s); std::string tok; double vals[4]; int i = 0;
+    std::stringstream ss(s);
+    std::string tok;
+    double vals[4];
+    int i = 0;
     while (std::getline(ss, tok, ',') && i < 4) vals[i++] = std::stod(trim(tok));
     if (i != 4) return false;
-    r.x = vals[0]; r.y = vals[1]; r.w = vals[2]; r.h = vals[3];
+    r.x = vals[0];
+    r.y = vals[1];
+    r.w = vals[2];
+    r.h = vals[3];
     r = clamp_roi(r);
     return true;
 }
@@ -43,6 +52,8 @@ static void load_config(const std::string& path, AppOptions& o) {
         const std::string v = trim(line.substr(pos + 1));
 
         if (k == "mode") o.mode = v;
+        else if (k == "probe_task") o.probe_task = v;
+        else if (k == "roi_mode") o.roi_mode = normalize_roi_mode(v);
         else if (k == "device") o.device = v;
         else if (k == "width") o.width = std::stoi(v);
         else if (k == "height") o.height = std::stoi(v);
@@ -74,6 +85,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "save_rois") o.save_rois = v;
         else if (k == "load_rois") o.load_rois = v;
         else if (k == "save_report") o.save_report = v;
+        else if (k == "snap_path") o.snap_path = v;
 
         else if (k == "red_roi") parse_roi_csv(v, o.default_rois.red_roi);
         else if (k == "image_roi") parse_roi_csv(v, o.default_rois.image_roi);
@@ -84,6 +96,22 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "red_h2_high") o.red_cfg.h2_high = std::stoi(v);
         else if (k == "red_s_min") o.red_cfg.s_min = std::stoi(v);
         else if (k == "red_v_min") o.red_cfg.v_min = std::stoi(v);
+
+        else if (k == "red_band_y0") o.dynamic_red.band_y0 = std::stoi(v);
+        else if (k == "red_band_y1") o.dynamic_red.band_y1 = std::stoi(v);
+        else if (k == "red_search_x0") o.dynamic_red.search_x0 = std::stoi(v);
+        else if (k == "red_search_x1") o.dynamic_red.search_x1 = std::stoi(v);
+        else if (k == "roi_gap_above_band") o.dynamic_red.roi_gap_above_band = std::stoi(v);
+        else if (k == "roi_anchor_y") o.dynamic_red.roi_anchor_y = std::stoi(v);
+        else if (k == "roi_width") o.dynamic_red.roi_width = std::stoi(v);
+        else if (k == "roi_height") o.dynamic_red.roi_height = std::stoi(v);
+        else if (k == "red_min_area") o.dynamic_red.min_area = std::stoi(v);
+        else if (k == "red_max_area") o.dynamic_red.max_area = std::stoi(v);
+        else if (k == "red_morph_k") o.dynamic_red.morph_k = std::stoi(v);
+        else if (k == "red_miss_tolerance") o.dynamic_red.miss_tolerance = std::stoi(v);
+        else if (k == "red_fallback_center_x") o.dynamic_red.fallback_center_x = std::stoi(v);
+        else if (k == "red_center_alpha") o.dynamic_red.center_alpha = std::stod(v);
+        else if (k == "red_show_mask_window") o.dynamic_red.show_mask_window = parse_bool(v);
 
         else if (k == "model_enable") o.model_cfg.enable = parse_bool(v);
         else if (k == "model_backend") o.model_cfg.backend = v;
@@ -124,13 +152,22 @@ Modes:
   --mode calibrate
   --mode deploy
 
+Probe tasks:
+  --probe-task list|live|snap|bench
+  --snap-path PATH
+
+ROI runtime modes:
+  --roi-mode fixed|dynamic-red-x
+
 Core args:
   --config PATH
   --device /dev/video0
-  --width 640 --height 480 --fourcc MJPG --fps 120
+  --width 160 --height 120 --fourcc MJPG --fps 120
   --ui 1
+  --headless
   --draw-overlay 1
   --duration 10
+  --save-report ../report/latest_report.md
 
 Calibration args:
   --warp-width 384 --warp-height 384
@@ -141,9 +178,24 @@ Calibration args:
   --save-warp ../report/warp_package.yml.gz
   --save-rois ../report/rois.yml
 
-ROI/debug args:
+Fixed ROI args:
   --red-roi x,y,w,h
   --image-roi x,y,w,h
+
+Dynamic red-x args:
+  --red-band-y0 N --red-band-y1 N
+  --red-search-x0 N --red-search-x1 N
+  --roi-gap-above-band N
+  --roi-anchor-y N   (legacy override)
+  --roi-width N --roi-height N
+  --red-min-area N --red-max-area N
+  --red-morph-k N
+  --red-center-alpha F
+  --red-miss-tolerance N
+  --red-fallback-center-x N
+  --red-show-mask-window 1
+
+Red threshold args:
   --red-h1-low N --red-h1-high N --red-h2-low N --red-h2-high N
   --red-s-min N --red-v-min N
 
@@ -170,10 +222,108 @@ Partial pipeline / capture args:
   --save-every-n 10
 
 Examples:
-  ./vision_app --mode probe --device /dev/video0
-  ./vision_app --mode calibrate --device /dev/video0 --width 160 --height 120 --fourcc MJPG --fps 120 --warp-width 384 --warp-height 384 --target-tag-px 128
-  ./vision_app --mode deploy --device /dev/video0 --width 160 --height 120 --fourcc MJPG --fps 120 --load-warp ../report/warp_package.yml.gz --load-rois ../report/rois.yml --model-enable 1 --model-backend ncnn --model-ncnn-param-path ../models/model.ncnn.param --model-ncnn-bin-path ../models/model.ncnn.bin --model-labels-path ../models/labels.txt --model-input-width 128 --model-input-height 128 --model-preprocess crop --model-threads 4 --model-stride 1 --model-max-hz 5
+  ./vision_app --mode probe --probe-task list --device /dev/video0
+  ./vision_app --mode probe --probe-task bench --device /dev/video0 --headless --duration 10 --save-report ../report/probe_bench.md
+  ./vision_app --config configs/pi5_fast.conf --mode calibrate --roi-mode fixed
+  ./vision_app --config configs/pi5_fast.conf --mode calibrate --roi-mode dynamic-red-x --red-show-mask-window 1
+  ./vision_app --config configs/pi5_fast.conf --mode deploy --roi-mode fixed
+  ./vision_app --config configs/pi5_fast.conf --mode deploy --roi-mode dynamic-red-x
 )TXT";
+}
+
+static bool run_probe_mode(const AppOptions& opt, std::string& err) {
+    if (opt.probe_task == "list") {
+        CameraProbeResult probe;
+        if (!probe_camera(opt.device, probe, err)) return false;
+        print_probe(probe);
+        return true;
+    }
+
+    if (opt.probe_task == "snap") {
+        int cam_w = opt.width;
+        int cam_h = opt.height;
+        cv::VideoCapture cap;
+        if (!open_capture(cap, opt.device, cam_w, cam_h, opt.fps, opt.fourcc,
+                          opt.buffer_size, opt.camera_soft_max, err)) {
+            return false;
+        }
+
+        cv::Mat frame;
+        for (int i = 0; i < 5; ++i) {
+            if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) {
+                err = "failed to warm up / read frame";
+                return false;
+            }
+        }
+        if (frame.empty()) {
+            err = "empty frame during snap";
+            return false;
+        }
+
+        const fs::path out_path = opt.snap_path.empty()
+            ? fs::path("../captures/probe_snap.jpg")
+            : fs::path(opt.snap_path);
+        if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+        if (!cv::imwrite(out_path.string(), frame)) {
+            err = "failed to save image: " + out_path.string();
+            return false;
+        }
+
+        std::cout << "Saved snap -> " << out_path << "\n";
+        std::cout << "Frame size  -> " << frame.cols << 'x' << frame.rows << "\n";
+        if (!opt.save_report.empty()) {
+            write_report_md(opt.save_report,
+                            "Probe Snap Report",
+                            nullptr,
+                            std::string("- Device: ") + opt.device + "\n" +
+                            "- Saved image: " + out_path.string() + "\n" +
+                            "- Frame size: " + std::to_string(frame.cols) + "x" + std::to_string(frame.rows) + "\n" +
+                            "- Requested mode: " + std::to_string(opt.width) + "x" + std::to_string(opt.height) +
+                            " @ " + std::to_string(opt.fps) + " fps" + "\n");
+        }
+        return true;
+    }
+
+    if (opt.probe_task == "live" || opt.probe_task == "bench") {
+        RuntimeStats stats;
+        const bool headless = !opt.ui;
+        const int duration = std::max(1, opt.duration);
+        if (!bench_capture(opt.device,
+                           opt.width,
+                           opt.height,
+                           opt.fps,
+                           opt.fourcc,
+                           opt.buffer_size,
+                           opt.latest_only,
+                           opt.drain_grabs,
+                           headless,
+                           duration,
+                           opt.camera_soft_max,
+                           opt.camera_preview_max,
+                           stats,
+                           err)) {
+            return false;
+        }
+
+        if (opt.probe_task == "bench") {
+            print_runtime_stats(stats);
+            if (!opt.save_report.empty()) {
+                write_report_md(opt.save_report,
+                                "Probe Bench Report",
+                                &stats,
+                                std::string("- Device: ") + opt.device + "\n" +
+                                "- Requested mode: " + std::to_string(opt.width) + "x" + std::to_string(opt.height) +
+                                " @ " + std::to_string(opt.fps) + " fps" + "\n" +
+                                "- FOURCC: " + opt.fourcc + "\n" +
+                                "- latest_only: " + std::string(opt.latest_only ? "true" : "false") + "\n" +
+                                "- drain_grabs: " + std::to_string(opt.drain_grabs));
+            }
+        }
+        return true;
+    }
+
+    err = "unknown --probe-task: " + opt.probe_task + ". Use list|live|snap|bench.";
+    return false;
 }
 
 int main(int argc, char** argv) {
@@ -185,16 +335,22 @@ int main(int argc, char** argv) {
     opt.model_max_hz = 5.0;
     std::string config_path = "vision_app.conf";
 
-    auto need = [&](int& i, const char* flag)->std::string {
-        if (i + 1 >= argc) { throw std::runtime_error(std::string("missing value for ") + flag); }
+    auto need = [&](int& i, const char* flag) -> std::string {
+        if (i + 1 >= argc) {
+            throw std::runtime_error(std::string("missing value for ") + flag);
+        }
         return argv[++i];
     };
 
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
-            if (a == "--help" || a == "-h") { print_help(); return 0; }
-            else if (a == "--config") config_path = need(i, "--config");
+            if (a == "--help" || a == "-h") {
+                print_help();
+                return 0;
+            } else if (a == "--config") {
+                config_path = need(i, "--config");
+            }
         }
         load_config(config_path, opt);
 
@@ -203,6 +359,8 @@ int main(int argc, char** argv) {
             if (a == "--help" || a == "-h") {}
             else if (a == "--config") { ++i; }
             else if (a == "--mode") opt.mode = need(i, "--mode");
+            else if (a == "--probe-task") opt.probe_task = need(i, "--probe-task");
+            else if (a == "--roi-mode") opt.roi_mode = normalize_roi_mode(need(i, "--roi-mode"));
             else if (a == "--device") opt.device = need(i, "--device");
             else if (a == "--width") opt.width = std::stoi(need(i, "--width"));
             else if (a == "--height") opt.height = std::stoi(need(i, "--height"));
@@ -212,6 +370,7 @@ int main(int argc, char** argv) {
             else if (a == "--latest-only") opt.latest_only = parse_bool(need(i, "--latest-only"));
             else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need(i, "--drain-grabs"));
             else if (a == "--ui") opt.ui = parse_bool(need(i, "--ui"));
+            else if (a == "--headless") opt.ui = false;
             else if (a == "--draw-overlay") opt.draw_overlay = parse_bool(need(i, "--draw-overlay"));
             else if (a == "--duration") opt.duration = std::stoi(need(i, "--duration"));
 
@@ -233,9 +392,14 @@ int main(int argc, char** argv) {
             else if (a == "--save-rois") opt.save_rois = need(i, "--save-rois");
             else if (a == "--load-rois") opt.load_rois = need(i, "--load-rois");
             else if (a == "--save-report") opt.save_report = need(i, "--save-report");
+            else if (a == "--snap-path") opt.snap_path = need(i, "--snap-path");
 
-            else if (a == "--red-roi") { if (!parse_roi_csv(need(i, "--red-roi"), opt.default_rois.red_roi)) throw std::runtime_error("bad --red-roi"); }
-            else if (a == "--image-roi") { if (!parse_roi_csv(need(i, "--image-roi"), opt.default_rois.image_roi)) throw std::runtime_error("bad --image-roi"); }
+            else if (a == "--red-roi") {
+                if (!parse_roi_csv(need(i, "--red-roi"), opt.default_rois.red_roi)) throw std::runtime_error("bad --red-roi");
+            }
+            else if (a == "--image-roi") {
+                if (!parse_roi_csv(need(i, "--image-roi"), opt.default_rois.image_roi)) throw std::runtime_error("bad --image-roi");
+            }
 
             else if (a == "--red-h1-low") opt.red_cfg.h1_low = std::stoi(need(i, "--red-h1-low"));
             else if (a == "--red-h1-high") opt.red_cfg.h1_high = std::stoi(need(i, "--red-h1-high"));
@@ -243,6 +407,22 @@ int main(int argc, char** argv) {
             else if (a == "--red-h2-high") opt.red_cfg.h2_high = std::stoi(need(i, "--red-h2-high"));
             else if (a == "--red-s-min") opt.red_cfg.s_min = std::stoi(need(i, "--red-s-min"));
             else if (a == "--red-v-min") opt.red_cfg.v_min = std::stoi(need(i, "--red-v-min"));
+
+            else if (a == "--red-band-y0") opt.dynamic_red.band_y0 = std::stoi(need(i, "--red-band-y0"));
+            else if (a == "--red-band-y1") opt.dynamic_red.band_y1 = std::stoi(need(i, "--red-band-y1"));
+            else if (a == "--red-search-x0") opt.dynamic_red.search_x0 = std::stoi(need(i, "--red-search-x0"));
+            else if (a == "--red-search-x1") opt.dynamic_red.search_x1 = std::stoi(need(i, "--red-search-x1"));
+            else if (a == "--roi-gap-above-band") opt.dynamic_red.roi_gap_above_band = std::stoi(need(i, "--roi-gap-above-band"));
+            else if (a == "--roi-anchor-y") opt.dynamic_red.roi_anchor_y = std::stoi(need(i, "--roi-anchor-y"));
+            else if (a == "--roi-width") opt.dynamic_red.roi_width = std::stoi(need(i, "--roi-width"));
+            else if (a == "--roi-height") opt.dynamic_red.roi_height = std::stoi(need(i, "--roi-height"));
+            else if (a == "--red-min-area") opt.dynamic_red.min_area = std::stoi(need(i, "--red-min-area"));
+            else if (a == "--red-max-area") opt.dynamic_red.max_area = std::stoi(need(i, "--red-max-area"));
+            else if (a == "--red-morph-k") opt.dynamic_red.morph_k = std::stoi(need(i, "--red-morph-k"));
+            else if (a == "--red-miss-tolerance") opt.dynamic_red.miss_tolerance = std::stoi(need(i, "--red-miss-tolerance"));
+            else if (a == "--red-fallback-center-x") opt.dynamic_red.fallback_center_x = std::stoi(need(i, "--red-fallback-center-x"));
+            else if (a == "--red-center-alpha") opt.dynamic_red.center_alpha = std::stod(need(i, "--red-center-alpha"));
+            else if (a == "--red-show-mask-window") opt.dynamic_red.show_mask_window = parse_bool(need(i, "--red-show-mask-window"));
 
             else if (a == "--model-enable") opt.model_cfg.enable = parse_bool(need(i, "--model-enable"));
             else if (a == "--model-backend") opt.model_cfg.backend = need(i, "--model-backend");
@@ -270,17 +450,24 @@ int main(int argc, char** argv) {
 
         std::string err;
         if (opt.mode == "probe") {
-            CameraProbeResult probe;
-            if (!probe_camera(opt.device, probe, err)) { std::cerr << "Probe failed: " << err << "\n"; return 1; }
-            print_probe(probe);
+            if (!run_probe_mode(opt, err)) {
+                std::cerr << "Probe failed: " << err << "\n";
+                return 1;
+            }
             return 0;
         }
         if (opt.mode == "calibrate" || opt.mode == "live") {
-            if (!run_calibrate(opt, err)) { std::cerr << "Calibrate failed: " << err << "\n"; return 1; }
+            if (!run_calibrate(opt, err)) {
+                std::cerr << "Calibrate failed: " << err << "\n";
+                return 1;
+            }
             return 0;
         }
         if (opt.mode == "deploy") {
-            if (!run_deploy(opt, err)) { std::cerr << "Deploy failed: " << err << "\n"; return 1; }
+            if (!run_deploy(opt, err)) {
+                std::cerr << "Deploy failed: " << err << "\n";
+                return 1;
+            }
             return 0;
         }
 

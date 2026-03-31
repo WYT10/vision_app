@@ -1,36 +1,49 @@
+# vision_app compact operator pack v2
 
-# vision_app
+This pack now exposes **two explicit ROI runtime modes** so you can compare the old method and the new red-center method cleanly.
 
-# Drop-in replacement notes
+## ROI runtime modes
 
-Replace your project files with **this entire drop-in set** (do not mix old/new headers).
-At minimum, replace:
-- `src/`
-- `cmake/`
-- `CMakeLists.txt`
-- `README.md`
-- `vision_app.conf`
+### 1) `fixed`
+Classic behavior.
 
-This avoids the mixed old/new API state that caused the previous build failures.
+- save `red_roi`
+- save `image_roi`
+- deploy crops exactly those two fixed rectangles
+- red logic reports `red_ratio` inside the fixed `red_roi`
 
-Ready-to-run drop-in build for:
-- `probe`
-- `calibrate`
-- `deploy`
+### 2) `dynamic-red-x`
+New behavior.
 
-This version keeps:
-- camera probing and FPS benchmarking helpers
-- AprilTag calibration UI and ROI editing
-- ONNX Runtime classifier backend
-- NCNN classifier backend
-- separate testing toggles for `red_roi`, `image_roi`, and model inference
-- prediction rate limiting with `--model-max-hz`
+- define a fixed red search band in the warped image
+- threshold red only inside that band
+- find the best red blob
+- use **blob center x only**
+- build `image_roi` automatically from:
+  - `x_center`
+  - `red_band_y0`
+  - `roi_gap_above_band`
+  - `roi_width`
+  - `roi_height`
+- if red disappears briefly, hold last center for `red_miss_tolerance`
+- if nothing valid is available, fallback to band center or `red_fallback_center_x`
 
-## Pull latest project
+This keeps the two methods separate and directly comparable.
 
-```bash
-git pull https://github.com/WYT10/vision_app.git main
-```
+---
+
+## What changed in v2
+
+- added `--roi-mode fixed|dynamic-red-x`
+- added dynamic red-center runtime path in `roi_helper.cpp`
+- calibrate/deploy overlays now show the active mode
+- added `m` key to toggle fixed <-> dynamic-red-x in UI sessions
+- optional `vision_app_red_mask` window for dynamic mode
+- `rois.yml` can now also store:
+  - `roi_mode`
+  - dynamic red-band / crop parameters
+
+---
 
 ## Build on Raspberry Pi
 
@@ -45,176 +58,130 @@ cmake ..
 make -j$(nproc)
 ```
 
-## Modes
+---
 
-### 1) Probe
-Show supported camera modes from `v4l2-ctl`:
+## Short commands
 
-```bash
-./vision_app --mode probe --device /dev/video0
-```
-
-### 2) Calibrate
-Open the camera, detect the AprilTag, and map the 4 detected tag corners to a centered
-`target_tag_px x target_tag_px` square inside the warped canvas `warp_width x warp_height`.
-
-Use the UI to:
-- lock/unlock
-- move/resize `red_roi`
-- move/resize `image_roi`
-- save warp / save rois / save all
-
-Example:
+### Probe list
 
 ```bash
-./vision_app \
-  --mode calibrate \
-  --device /dev/video0 \
-  --width 160 --height 120 --fourcc MJPG --fps 120 \
-  --warp-width 384 --warp-height 384 \
-  --target-tag-px 128 \
-  --tag-family auto --target-id 0 \
-  --save-warp ../report/warp_package.yml.gz \
-  --save-rois ../report/rois.yml
+./vision_app --mode probe --probe-task list --device /dev/video0
 ```
 
-Controls:
-- `SPACE` / `ENTER`: lock current tag
-- `u`: unlock
-- `1` / `2`: select `red_roi` / `image_roi`
-- `w a s d`: move ROI
-- `i / k`: height - / +
-- `j / l`: width - / +
-- `[` / `]`: move step down / up
-- `,` / `.`: size step down / up
-- `p`: save all
-- `y`: save warp only
-- `o`: save rois only
-- `r`: reset rois
-- `q` / `ESC`: quit
-
-### 3) Deploy
-Load saved warp + rois, compute `red_roi`, crop `image_roi`, and optionally classify with ONNX or NCNN.
-
-#### NCNN deploy example
+### Probe bench
 
 ```bash
-./vision_app \
-  --mode deploy \
-  --device /dev/video0 \
-  --width 160 --height 120 --fourcc MJPG --fps 120 \
-  --load-warp ../report/warp_package.yml.gz \
-  --load-rois ../report/rois.yml \
-  --model-enable 1 \
-  --model-backend ncnn \
-  --model-ncnn-param-path ../models/model.ncnn.param \
-  --model-ncnn-bin-path ../models/model.ncnn.bin \
-  --model-labels-path ../models/labels.txt \
-  --model-input-width 128 --model-input-height 128 \
-  --model-preprocess crop \
-  --model-threads 4 \
-  --model-stride 1 \
-  --model-max-hz 5.0
+./vision_app --mode probe --probe-task bench --device /dev/video0 --headless --duration 10 --save-report ../report/probe_bench.md
 ```
 
-#### ONNX deploy example
+### Calibrate old fixed mode
 
 ```bash
-./vision_app \
-  --mode deploy \
-  --device /dev/video0 \
-  --width 160 --height 120 --fourcc MJPG --fps 120 \
-  --load-warp ../report/warp_package.yml.gz \
-  --load-rois ../report/rois.yml \
-  --model-enable 1 \
-  --model-backend onnx \
-  --model-onnx-path ../models/best.onnx \
-  --model-labels-path ../models/labels.txt \
-  --model-input-width 128 --model-input-height 128 \
-  --model-preprocess crop \
-  --model-threads 4 \
-  --model-stride 1 \
-  --model-max-hz 5.0
+./vision_app --config configs/pi5_fast.conf --mode calibrate --roi-mode fixed
 ```
 
-## Separate testing in deploy
+### Calibrate dynamic red-center mode
 
-You can test the three subsystems separately:
-
-### Red ROI only
 ```bash
-./vision_app --mode deploy ... --run-red 1 --run-image-roi 0 --run-model 0
+./vision_app --config configs/pi5_fast.conf --mode calibrate --roi-mode dynamic-red-x --red-show-mask-window 1
 ```
 
-### Image ROI capture only
+### Deploy old fixed mode
+
 ```bash
-./vision_app --mode deploy ... --run-red 0 --run-image-roi 1 --run-model 0 \
-  --save-image-roi-dir ../captures/image_roi --save-every-n 10
+./vision_app --config configs/pi5_fast.conf --mode deploy --roi-mode fixed
 ```
 
-### Full classification
+### Deploy dynamic red-center mode
+
 ```bash
-./vision_app --mode deploy ... --run-red 1 --run-image-roi 1 --run-model 1
+./vision_app --config configs/pi5_fast.conf --mode deploy --roi-mode dynamic-red-x
 ```
 
-## Notes
+---
 
-- Keep the **same camera mode** between calibration and deploy.
-- The saved warp package stores the original calibration source size. If deploy uses a different camera size,
-  the app prints a warning because the remap no longer matches the original geometry.
-- `image_roi` should ideally match the model input size used during training.
-- Use NCNN as the default deploy backend on Pi; keep ONNX for parity/debug.
+## Dynamic red-center parameters
 
-## Example config (`vision_app.conf`)
+These are in warped-image pixel coordinates.
 
 ```ini
-mode=deploy
-device=/dev/video0
-width=160
-height=120
-fps=120
-fourcc=MJPG
-ui=1
-
-warp_width=384
-warp_height=384
-target_tag_px=128
-tag_family=auto
-target_id=0
-manual_lock_only=1
-lock_frames=4
-
-save_warp=../report/warp_package.yml.gz
-load_warp=../report/warp_package.yml.gz
-save_rois=../report/rois.yml
-load_rois=../report/rois.yml
-save_report=../report/latest_report.md
-
-red_roi=0.08,0.08,0.18,0.18
-image_roi=0.32,0.10,0.50,0.55
-
-red_h1_low=0
-red_h1_high=10
-red_h2_low=170
-red_h2_high=180
-red_s_min=80
-red_v_min=60
-
-model_enable=1
-model_backend=ncnn
-model_ncnn_param_path=../models/model.ncnn.param
-model_ncnn_bin_path=../models/model.ncnn.bin
-model_labels_path=../models/labels.txt
-model_input_width=128
-model_input_height=128
-model_preprocess=crop
-model_threads=4
-model_stride=1
-model_max_hz=5.0
-model_topk=5
-
-run_red=1
-run_image_roi=1
-run_model=1
-save_every_n=0
+roi_mode=dynamic-red-x
+red_band_y0=120
+red_band_y1=180
+red_search_x0=0
+red_search_x1=-1
+roi_gap_above_band=0
+roi_anchor_y=-1
+roi_width=96
+roi_height=96
+red_min_area=40
+red_max_area=0
+red_morph_k=3
+red_center_alpha=0.70
+red_miss_tolerance=5
+red_fallback_center_x=-1
+red_show_mask_window=0
 ```
+
+Meaning:
+
+- `red_band_y0 / red_band_y1`: vertical band for red search
+- `red_search_x0 / red_search_x1`: optional horizontal search limits
+- `roi_gap_above_band`: distance between image-roi bottom and red-band top
+- `roi_anchor_y`: legacy direct top-y override; keep `-1` to use the gap model
+- `roi_width / roi_height`: final crop size
+- `red_min_area / red_max_area`: blob filter
+- `red_morph_k`: morphology kernel size
+- `red_center_alpha`: smoothing weight for new x detections
+- `red_miss_tolerance`: frames to hold last x before fallback
+- `red_fallback_center_x`: explicit fallback x, or `-1` for band center
+
+---
+
+## UI behavior
+
+### In `fixed`
+You will see:
+- fixed `red_roi`
+- fixed `image_roi`
+
+### In `dynamic-red-x`
+You will see:
+- orange search band
+- green `x_center` line
+- blue auto-placed `dynamic_image_roi`
+- optional red-mask debug window
+
+### In calibrate UI
+- `m` toggles mode
+- fixed mode keeps the old rectangle editor
+- dynamic mode is live-tunable:
+  - `w/s` move band
+  - `i/k` band height
+  - `a/d` ROI width
+  - `z/x` ROI height
+  - `j/l` gap above band
+  - `[/]` dynamic pixel step
+
+---
+
+## Best workflow
+
+1. lock warp in `calibrate`
+2. compare `fixed` and `dynamic-red-x` on the same saved warp
+3. save crops from both modes
+4. run deploy with the same camera mode and model backend
+5. compare stability, missed detections, and model accuracy
+
+---
+
+## File map
+
+- `src/main.cpp` — CLI entrypoint
+- `src/camera.hpp` — probe / capture helpers
+- `src/calibrate.hpp` — tag detection, warp package, ROI geometry, roi yaml
+- `src/deploy.hpp` — calibrate and deploy app loops, active mode overlays
+- `src/roi_helper.cpp` — fixed ROI runtime + dynamic red-center runtime
+- `src/model.cpp` / `src/model.hpp` — classifier runtime facade
+- `docs/FUNCTIONS.md` — function inventory
+- `tools/` — dataset + training + export helpers
