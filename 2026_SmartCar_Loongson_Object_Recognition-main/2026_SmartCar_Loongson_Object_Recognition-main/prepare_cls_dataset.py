@@ -7,7 +7,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence, cast
 
 import cv2
 import numpy as np
@@ -25,7 +25,7 @@ SRC_DIR = PROJECT_ROOT / "img_dataset"
 # Output folder management
 OUTPUT_ROOT = PROJECT_ROOT / "generated_datasets"
 OUTPUT_PREFIX = "dataset_cls"
-DATASET_VERSION = "v3"
+DATASET_VERSION = "v3_abab"
 AUTO_NAME_OUTPUT = True
 RUN_DATE_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -37,8 +37,23 @@ INCLUDE_SPECIAL_CHAR_FOLDER = False
 # Final ROI / model input size
 TARGET_SIZE = 40
 
-# Blur tuning for transformed variants.
-BLUR_STRENGTH_MULTIPLIER = 2.0
+# Optional sequential post-augmentation operations.
+# Keep empty to disable forced blur/noise processing.
+# Available ops:
+#   - "salt_pepper_noise"
+#   - "median_blur"
+# Example for a,b,a,b: ["salt_pepper_noise", "median_blur", "salt_pepper_noise", "median_blur"]
+POST_AUG_OP_SEQUENCE: List[str] = [
+    "salt_pepper_noise",
+    "median_blur"
+]
+
+# Salt-pepper noise config
+SALT_PEPPER_AMOUNT_RANGE = (0.003, 0.02)
+SALT_PEPPER_SALT_VS_PEPPER = 0.5
+
+# Median blur config (must be odd kernel sizes)
+MEDIAN_BLUR_KERNEL_CHOICES = [3, 5, 7]
 
 # REQUIRED BEHAVIOR:
 # each source image creates 5 images in each split
@@ -195,6 +210,48 @@ def resize_to_target_pil(img_pil: Image.Image) -> Image.Image:
 # =========================================================
 # Torchvision-style augmentation
 # =========================================================
+def apply_salt_pepper_noise(img_pil: Image.Image, rng: random.Random) -> Image.Image:
+    img = np.array(img_pil).copy()
+    h, w, _ = img.shape
+    amount = rng.uniform(*SALT_PEPPER_AMOUNT_RANGE)
+    total_pixels = h * w
+    noisy_pixels = max(1, int(total_pixels * amount))
+
+    num_salt = int(noisy_pixels * SALT_PEPPER_SALT_VS_PEPPER)
+    num_pepper = max(0, noisy_pixels - num_salt)
+
+    if num_salt > 0:
+        ys = np.array([rng.randrange(h) for _ in range(num_salt)], dtype=np.int32)
+        xs = np.array([rng.randrange(w) for _ in range(num_salt)], dtype=np.int32)
+        img[ys, xs] = 255
+
+    if num_pepper > 0:
+        ys = np.array([rng.randrange(h) for _ in range(num_pepper)], dtype=np.int32)
+        xs = np.array([rng.randrange(w) for _ in range(num_pepper)], dtype=np.int32)
+        img[ys, xs] = 0
+
+    return Image.fromarray(img)
+
+
+def apply_median_blur(img_pil: Image.Image, rng: random.Random) -> Image.Image:
+    k = rng.choice(MEDIAN_BLUR_KERNEL_CHOICES)
+    img = np.array(img_pil)
+    img = cv2.medianBlur(img, k)
+    return Image.fromarray(img)
+
+
+def apply_post_aug_ops(img_pil: Image.Image, rng: random.Random, op_sequence: Sequence[str]) -> Image.Image:
+    img = img_pil
+    for op in op_sequence:
+        if op == "salt_pepper_noise":
+            img = apply_salt_pepper_noise(img, rng)
+        elif op == "median_blur":
+            img = apply_median_blur(img, rng)
+        else:
+            raise ValueError(f"Unknown post augmentation op: {op}")
+    return img
+
+
 def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     rng = random.Random(seed)
 
@@ -225,10 +282,8 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     if rng.random() < 0.5:
         img = TF.adjust_saturation(img, rng.uniform(0.9, 1.1))
 
-    # Always add blur to transformed variants to improve robustness.
-    k = rng.choice([5, 7, 9])
-    sigma = rng.uniform(0.2, 1.5) * BLUR_STRENGTH_MULTIPLIER
-    img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
+    # User-configurable ordered ops, e.g. a,b,a,b.
+    img = apply_post_aug_ops(cast(Image.Image, img), rng, POST_AUG_OP_SEQUENCE)
 
     return img
 
@@ -389,6 +444,7 @@ def main() -> None:
         "seed": SEED,
         "target_size": TARGET_SIZE,
         "versions_per_split": VERSIONS_PER_SPLIT,
+        "post_aug_op_sequence": POST_AUG_OP_SEQUENCE,
         "classes": {},
         "totals": {"train": 0, "val": 0, "test": 0, "all": 0},
         "warnings": [],
@@ -403,6 +459,7 @@ def main() -> None:
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
     print(f"Versions per split: {VERSIONS_PER_SPLIT}")
+    print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
     print("=" * 84)
 
     # Normal classes
@@ -463,6 +520,7 @@ def main() -> None:
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
     print(f"Versions per split: {VERSIONS_PER_SPLIT}")
+    print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
     print("=" * 84)
 
     for cls_name in sorted(summary["classes"].keys()):
