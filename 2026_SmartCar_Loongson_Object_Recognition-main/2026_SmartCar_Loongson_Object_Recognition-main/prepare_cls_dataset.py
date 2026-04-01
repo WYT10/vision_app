@@ -31,9 +31,10 @@ AUTO_NAME_OUTPUT = True
 SEED = 42
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPECIAL_CHAR_FOLDER = "字母和数字标识"
+INCLUDE_SPECIAL_CHAR_FOLDER = False
 
 # Final ROI / model input size
-TARGET_SIZE = 60
+TARGET_SIZE = 40
 
 # REQUIRED BEHAVIOR:
 # each source image creates 5 images in each split
@@ -192,7 +193,7 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
 
     img = resize_to_target_pil(base_pil)
 
-    angle = rng.uniform(-15.0, 15.0)
+    angle = rng.uniform(-20.0, 20.0)
     translate = (
         int(rng.uniform(-0.06, 0.06) * TARGET_SIZE),
         int(rng.uniform(-0.06, 0.06) * TARGET_SIZE),
@@ -217,10 +218,10 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     if rng.random() < 0.5:
         img = TF.adjust_saturation(img, rng.uniform(0.9, 1.1))
 
-    if rng.random() < 0.5:
-        k = rng.choice([3, 5, 7])
-        sigma = rng.uniform(0.2, 1.5)
-        img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
+    # Always add blur to transformed variants to improve robustness.
+    k = rng.choice([3, 5, 7])
+    sigma = rng.uniform(0.2, 1.5)
+    img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
 
     return img
 
@@ -416,33 +417,34 @@ def main() -> None:
         if result["warning"]:
             summary["warnings"].append(result["warning"])
 
-    # Character classes
-    char_dir = SRC_DIR / SPECIAL_CHAR_FOLDER
-    if char_dir.exists() and char_dir.is_dir():
-        char_images = list_images(char_dir)
+    # Character classes (optional special folder)
+    if INCLUDE_SPECIAL_CHAR_FOLDER:
+        char_dir = SRC_DIR / SPECIAL_CHAR_FOLDER
+        if char_dir.exists() and char_dir.is_dir():
+            char_images = list_images(char_dir)
 
-        if char_images:
-            print("-" * 84)
-            print(f"Processing special folder: {SPECIAL_CHAR_FOLDER}")
+            if char_images:
+                print("-" * 84)
+                print(f"Processing special folder: {SPECIAL_CHAR_FOLDER}")
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(process_one_char_image, p) for p in char_images]
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                futures = [ex.submit(process_one_char_image, p) for p in char_images]
 
-            for fut in tqdm(as_completed(futures), total=len(futures), desc="Char classes", leave=True):
-                result = fut.result()
-                summary["classes"][result["class_name"]] = {
-                    "source_name": result["source_name"],
-                    "total": result["total"],
-                    "train": result["train"],
-                    "val": result["val"],
-                    "test": result["test"],
-                }
-                summary["totals"]["train"] += result["train"]
-                summary["totals"]["val"] += result["val"]
-                summary["totals"]["test"] += result["test"]
-                summary["totals"]["all"] += result["total"]
-                if result["warning"]:
-                    summary["warnings"].append(result["warning"])
+                for fut in tqdm(as_completed(futures), total=len(futures), desc="Char classes", leave=True):
+                    result = fut.result()
+                    summary["classes"][result["class_name"]] = {
+                        "source_name": result["source_name"],
+                        "total": result["total"],
+                        "train": result["train"],
+                        "val": result["val"],
+                        "test": result["test"],
+                    }
+                    summary["totals"]["train"] += result["train"]
+                    summary["totals"]["val"] += result["val"]
+                    summary["totals"]["test"] += result["test"]
+                    summary["totals"]["all"] += result["total"]
+                    if result["warning"]:
+                        summary["warnings"].append(result["warning"])
 
     write_metadata(summary)
 
