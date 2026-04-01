@@ -1,60 +1,97 @@
-# vision_app v2 — stacked red-zone blueprint
+# vision_app completed detailed v2
 
-This pack resets the design around the geometry you described:
+This pack resets the app around a clearer machine:
 
-- one **upper horizontal red zone**
-- one **lower horizontal red zone**
-- both zones must pass before the trigger is armed
-- `x_center` is computed from the two zones
-- the dynamic image ROI is synthesized **above the upper zone**
+`camera -> warp -> trigger -> roi synth -> optional model -> UI/report`
 
-This pack is meant to make the system understandable and implementable.
-It is a **clean architecture + starter implementation**, not a full drop-in finished app.
+## What is completed here
 
-## Core runtime model
+- real CLI mode dispatch
+- config file loading with CLI override precedence
+- inline `# comment` stripping in config
+- relative config paths resolved relative to the config file location
+- `probe` tasks:
+  - `list`
+  - `live`
+  - `snap`
+  - `bench`
+- two ROI modes:
+  - `fixed`
+  - `dynamic_red_stacked`
+- dynamic trigger logic using **two stacked horizontal red zones**
+- dynamic image ROI synthesized **above the upper zone**
+- wrapped independent text window: `vision_app_text`
+- optional red mask window: `vision_app_red_mask`
+- warp center placement control via:
+  - `warp_center_x_ratio`
+  - `warp_center_y_ratio`
 
-`camera -> tag lock -> warp -> stacked red trigger -> dynamic ROI synth -> optional model -> UI/log`
+## What is still limited
 
-## Two ROI modes
+- not compile-verified in this environment
+- dynamic parameters are only saved through config/report, not a dedicated dynamic YAML profile yet
+- model path remains optional and disabled by default
 
-### 1. `fixed`
-Old baseline mode.
-- saved `red_roi`
-- saved `image_roi`
-- deterministic rectangles
-- useful for baseline / comparison
+## Build
 
-### 2. `dynamic_red_stacked`
-New adaptive mode.
-- upper red zone
-- lower red zone
-- both zones must pass red thresholds
-- x-center computed from both zones
-- final ROI placed above the upper zone
+```bash
+export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH
+cd ~/Desktop/vision_app
+rm -rf build
+mkdir -p build
+cd build
+cmake ..
+make -j$(nproc)
+```
 
-## Windows
+## Typical runs
 
-- `vision_app_camera` — raw feed + tag / camera state
-- `vision_app_warp` — main warped view with trigger geometry and final ROI
-- `vision_app_red_mask` — binary red mask debug
-- `vision_app_text` — wrapped text console instead of overlay spam
+Probe formats:
 
-## What is implemented in this pack
+```bash
+./vision_app --mode probe --probe-task list --device /dev/video0
+```
 
-- explicit parameter model for stacked trigger zones
-- starter C++ implementation for:
-  - red mask extraction
-  - per-zone measurement
-  - trigger evaluation
-  - dynamic ROI synthesis above the upper zone
-- wrapped text console helper
-- docs for architecture, state machine, parameter reference, and UI interaction
+Probe benchmark:
 
-## What is intentionally not finished here
+```bash
+./vision_app --mode probe --probe-task bench --device /dev/video0 --duration 5
+```
 
-- full AprilTag detection / warp lock loop
-- full camera probing loop
-- full save/load config parser
-- full deploy loop
+Calibrate stacked dynamic mode:
 
-Those are kept out so the trigger geometry is easy to reason about first.
+```bash
+./vision_app --config ../configs/vision_app.conf --mode calibrate --roi-mode dynamic_red_stacked --red-show-mask-window 1
+```
+
+Deploy stacked dynamic mode:
+
+```bash
+./vision_app --config ../configs/vision_app.conf --mode deploy --roi-mode dynamic_red_stacked
+```
+
+
+## Folder layout
+
+```
+vision_app/
+├── CMakeLists.txt
+├── configs/
+│   └── vision_app.conf
+├── docs/
+├── include/vision_app/
+│   ├── camera.hpp
+│   ├── calibrate.hpp
+│   ├── classifier_common.hpp
+│   ├── deploy.hpp
+│   ├── model.hpp
+│   ├── ncnn_classifier.hpp
+│   ├── onnx_classifier.hpp
+│   ├── stats.hpp
+│   └── text_console.hpp
+├── src/
+│   ├── main.cpp
+│   ├── model.cpp
+│   └── roi_helper.cpp
+└── cmake/
+```
