@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import cv2
 import numpy as np
 from PIL import Image, ImageTk, ImageEnhance
 from pathlib import Path
 import random
+import json
 from torchvision.transforms import functional as TF
 from torchvision.transforms import InterpolationMode
 
@@ -28,6 +29,7 @@ class AugmentationTuner:
         toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
         
         ttk.Button(toolbar, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Export to Dataset Config", command=self.export_config).pack(side=tk.RIGHT, padx=5)
         
         # Layout: Left for image, Right for sequence
         main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -103,6 +105,25 @@ class AugmentationTuner:
             self.original_image_bgr = self._imread_unicode(path)
             if self.original_image_bgr is not None:
                 self.update_pipeline()
+
+    def export_config(self):
+        default_path = Path(__file__).resolve().parent / "aug_config.json"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            initialfile="aug_config.json",
+            initialdir=str(default_path.parent),
+            title="Save Augmentation Config"
+        )
+        if not path: return
+        
+        # Save sequence out 
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "note": "Auto-exported from Live Tuner",
+                "custom_sequence": True,
+                "sequence": self.sequence
+            }, f, indent=4)
+        messagebox.showinfo("Saved", f"Configuration exported to:\n{path}\n\nThe next run of prepare_cls_dataset.py will automatically pick this up!")
 
     def add_op(self, op_type):
         if op_type == "sp":

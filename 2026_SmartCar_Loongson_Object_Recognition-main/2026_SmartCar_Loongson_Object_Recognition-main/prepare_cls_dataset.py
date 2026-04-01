@@ -25,9 +25,26 @@ SRC_DIR = PROJECT_ROOT / "img_dataset"
 # Output folder management
 OUTPUT_ROOT = PROJECT_ROOT / "generated_datasets"
 OUTPUT_PREFIX = "dataset_cls"
-DATASET_VERSION = "v3_abab"
+DATASET_VERSION = "v3"
 AUTO_NAME_OUTPUT = True
 RUN_DATE_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# Attempt to load overrides from aug_config.json
+TUNED_CUSTOM_SEQUENCE = False
+TUNED_SEQUENCE = []
+
+config_path = PROJECT_ROOT / "aug_config.json"
+if config_path.exists():
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            tuner_data = json.load(f)
+            if tuner_data.get("custom_sequence", False):
+                TUNED_CUSTOM_SEQUENCE = True
+                TUNED_SEQUENCE = tuner_data.get("sequence", [])
+                DATASET_VERSION = "v_custom_tuned"
+                print(f"Loaded {len(TUNED_SEQUENCE)} custom operations from aug_config.json!")
+    except Exception as e:
+        print(f"Warning: Failed to load aug_config.json: {e}")
 
 SEED = 42
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -251,9 +268,65 @@ def apply_post_aug_ops(img_pil: Image.Image, rng: random.Random, op_sequence: Se
             raise ValueError(f"Unknown post augmentation op: {op}")
     return img
 
+def _apply_custom_sp(img_pil, amount, ratio, dot_size, rng):
+    img = np.array(img_pil).copy()
+    h, w, _ = img.shape
+    total_pixels = h * w
+    noisy_pixels = max(1, int(total_pixels * amount))
+    num_dots = max(1, int(noisy_pixels / (dot_size * dot_size)))
+
+    num_salt = int(num_dots * ratio)
+    num_pepper = max(0, num_dots - num_salt)
+
+    for _ in range(num_salt):
+        y = rng.randrange(h)
+        x = rng.randrange(w)
+        img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 255
+
+    for _ in range(num_pepper):
+        y = rng.randrange(h)
+        x = rng.randrange(w)
+        img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 0
+
+    return Image.fromarray(img)
+
+def apply_tuned_sequence(img_pil: Image.Image, rng: random.Random) -> Image.Image:
+    img = img_pil
+    for op in TUNED_SEQUENCE:
+        if op['type'] == 'sp':
+            img = _apply_custom_sp(img, op['amount'], op['ratio'], op.get('dot_size', 2), rng)
+        elif op['type'] == 'mb':
+            # ensure k is odd integer as per cv2 requirement
+            k = int(op['k'])
+            if k % 2 == 0: k += 1
+            if k < 1: k = 1
+            arr = np.array(img)
+            arr = cv2.medianBlur(arr, k)
+            img = Image.fromarray(arr)
+        elif op['type'] == 'rs':
+            img = TF.resize(img, [op['size'], op['size']], interpolation=InterpolationMode.BILINEAR, antialias=True)
+        elif op['type'] == 'af':
+            w, h = img.size
+            translate = [int(op['tx'] * w), int(op['ty'] * h)]
+            img = TF.affine(
+                img,
+                angle=op['angle'],
+                translate=translate,
+                scale=op['scale'],
+                shear=[op['shear'], 0.0],
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0,
+            )
+    return img
 
 def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
     rng = random.Random(seed)
+
+    if TUNED_CUSTOM_SEQUENCE:
+        # Bypass default Torchvision stuff entirely and ONLY do their custom chain!
+        img = apply_tuned_sequence(base_pil, rng)
+        img = resize_to_target_pil(img) # Ensure it ultimately conforms to TARGET_SIZE at the very end
+        return img
 
     img = resize_to_target_pil(base_pil)
 
@@ -444,6 +517,8 @@ def main() -> None:
         "seed": SEED,
         "target_size": TARGET_SIZE,
         "versions_per_split": VERSIONS_PER_SPLIT,
+        "is_custom_tuned_sequence": TUNED_CUSTOM_SEQUENCE,
+        "tuned_sequence": TUNED_SEQUENCE if TUNED_CUSTOM_SEQUENCE else [],
         "post_aug_op_sequence": POST_AUG_OP_SEQUENCE,
         "classes": {},
         "totals": {"train": 0, "val": 0, "test": 0, "all": 0},
@@ -459,7 +534,11 @@ def main() -> None:
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
     print(f"Versions per split: {VERSIONS_PER_SPLIT}")
-    print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
+    if TUNED_CUSTOM_SEQUENCE:
+        print(f"[!] Using Custom exported config from aug_config.json with {len(TUNED_SEQUENCE)} ops!")
+        print(f"Custom Sequence: {[x['type'] for x in TUNED_SEQUENCE]}")
+    else:
+        print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
     print("=" * 84)
 
     # Normal classes
@@ -520,7 +599,10 @@ def main() -> None:
     print(f"Folder name: {OUT_DIR.name}")
     print(f"Target size: {TARGET_SIZE}x{TARGET_SIZE}")
     print(f"Versions per split: {VERSIONS_PER_SPLIT}")
-    print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
+    if TUNED_CUSTOM_SEQUENCE:
+        print(f"[!] Used Custom exported config from aug_config.json")
+    else:
+        print(f"Post-aug op sequence: {POST_AUG_OP_SEQUENCE}")
     print("=" * 84)
 
     for cls_name in sorted(summary["classes"].keys()):
