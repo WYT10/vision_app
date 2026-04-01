@@ -20,6 +20,35 @@ static std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+static std::string strip_inline_comment(const std::string& s) {
+    const auto pos = s.find('#');
+    if (pos == std::string::npos) return trim(s);
+    return trim(s.substr(0, pos));
+}
+
+static std::string resolve_relative_path(const fs::path& base_dir, const std::string& raw) {
+    if (raw.empty()) return raw;
+    fs::path p(raw);
+    if (p.is_absolute()) return p.string();
+    return (base_dir / p).lexically_normal().string();
+}
+
+static void resolve_option_paths(const fs::path& config_path, AppOptions& o) {
+    const fs::path base_dir = config_path.has_parent_path() ? config_path.parent_path() : fs::current_path();
+    o.save_warp = resolve_relative_path(base_dir, o.save_warp);
+    o.load_warp = resolve_relative_path(base_dir, o.load_warp);
+    o.save_rois = resolve_relative_path(base_dir, o.save_rois);
+    o.load_rois = resolve_relative_path(base_dir, o.load_rois);
+    o.save_report = resolve_relative_path(base_dir, o.save_report);
+    o.snap_path = resolve_relative_path(base_dir, o.snap_path);
+    o.save_image_roi_dir = resolve_relative_path(base_dir, o.save_image_roi_dir);
+    o.save_red_roi_dir = resolve_relative_path(base_dir, o.save_red_roi_dir);
+    o.model_cfg.onnx_path = resolve_relative_path(base_dir, o.model_cfg.onnx_path);
+    o.model_cfg.ncnn_param_path = resolve_relative_path(base_dir, o.model_cfg.ncnn_param_path);
+    o.model_cfg.ncnn_bin_path = resolve_relative_path(base_dir, o.model_cfg.ncnn_bin_path);
+    o.model_cfg.labels_path = resolve_relative_path(base_dir, o.model_cfg.labels_path);
+}
+
 static bool parse_bool(const std::string& v) {
     return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "on";
 }
@@ -49,7 +78,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         const auto pos = line.find('=');
         if (pos == std::string::npos) continue;
         const std::string k = trim(line.substr(0, pos));
-        const std::string v = trim(line.substr(pos + 1));
+        const std::string v = strip_inline_comment(line.substr(pos + 1));
 
         if (k == "mode") o.mode = v;
         else if (k == "probe_task") o.probe_task = v;
@@ -65,6 +94,7 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "ui") o.ui = parse_bool(v);
         else if (k == "draw_overlay") o.draw_overlay = parse_bool(v);
         else if (k == "duration") o.duration = std::stoi(v);
+        else if (k == "text_console") o.text_console = parse_bool(v);
 
         else if (k == "camera_soft_max") o.camera_soft_max = std::stoi(v);
         else if (k == "camera_preview_max") o.camera_preview_max = std::stoi(v);
@@ -73,6 +103,8 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "warp_width") o.warp_width = std::stoi(v);
         else if (k == "warp_height") o.warp_height = std::stoi(v);
         else if (k == "target_tag_px") o.target_tag_px = std::stoi(v);
+        else if (k == "warp_center_x_ratio") o.warp_center_x_ratio = std::stod(v);
+        else if (k == "warp_center_y_ratio") o.warp_center_y_ratio = std::stod(v);
 
         else if (k == "tag_family") o.tag_family = v;
         else if (k == "target_id") o.target_id = std::stoi(v);
@@ -112,6 +144,12 @@ static void load_config(const std::string& path, AppOptions& o) {
         else if (k == "red_fallback_center_x") o.dynamic_red.fallback_center_x = std::stoi(v);
         else if (k == "red_center_alpha") o.dynamic_red.center_alpha = std::stod(v);
         else if (k == "red_show_mask_window") o.dynamic_red.show_mask_window = parse_bool(v);
+        else if (k == "red_require_dual_zone") o.dynamic_red.require_dual_zone = parse_bool(v);
+        else if (k == "red_zone_gap_px") o.dynamic_red.zone_gap_px = std::stoi(v);
+        else if (k == "red_zone_min_pixels") o.dynamic_red.zone_min_pixels = std::stoi(v);
+        else if (k == "red_zone_min_ratio") o.dynamic_red.zone_min_ratio = std::stod(v);
+        else if (k == "red_band_min_pixels") o.dynamic_red.band_min_pixels = std::stoi(v);
+        else if (k == "red_band_min_ratio") o.dynamic_red.band_min_ratio = std::stod(v);
 
         else if (k == "model_enable") o.model_cfg.enable = parse_bool(v);
         else if (k == "model_backend") o.model_cfg.backend = v;
@@ -172,6 +210,7 @@ Core args:
 Calibration args:
   --warp-width 384 --warp-height 384
   --target-tag-px 128
+  --warp-center-x-ratio 0.5 --warp-center-y-ratio 0.5
   --tag-family auto|16|25|36
   --target-id 0
   --manual-lock-only 1
@@ -198,6 +237,12 @@ Dynamic red-x args:
 Red threshold args:
   --red-h1-low N --red-h1-high N --red-h2-low N --red-h2-high N
   --red-s-min N --red-v-min N
+  --red-require-dual-zone 1
+  --red-zone-gap-px N
+  --red-zone-min-pixels N
+  --red-zone-min-ratio F
+  --red-band-min-pixels N
+  --red-band-min-ratio F
 
 Model args:
   --model-enable 1
@@ -353,6 +398,14 @@ int main(int argc, char** argv) {
             }
         }
         load_config(config_path, opt);
+        if (fs::exists(config_path)) {
+            resolve_option_paths(fs::path(config_path), opt);
+            std::cout << "[config] loaded " << fs::path(config_path).lexically_normal().string() << "
+";
+        } else if (config_path != "vision_app.conf") {
+            std::cerr << "[config] file not found: " << config_path << "
+";
+        }
 
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
@@ -372,6 +425,7 @@ int main(int argc, char** argv) {
             else if (a == "--ui") opt.ui = parse_bool(need(i, "--ui"));
             else if (a == "--headless") opt.ui = false;
             else if (a == "--draw-overlay") opt.draw_overlay = parse_bool(need(i, "--draw-overlay"));
+            else if (a == "--text-console") opt.text_console = parse_bool(need(i, "--text-console"));
             else if (a == "--duration") opt.duration = std::stoi(need(i, "--duration"));
 
             else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need(i, "--camera-soft-max"));
@@ -381,6 +435,8 @@ int main(int argc, char** argv) {
             else if (a == "--warp-width") opt.warp_width = std::stoi(need(i, "--warp-width"));
             else if (a == "--warp-height") opt.warp_height = std::stoi(need(i, "--warp-height"));
             else if (a == "--target-tag-px") opt.target_tag_px = std::stoi(need(i, "--target-tag-px"));
+            else if (a == "--warp-center-x-ratio") opt.warp_center_x_ratio = std::stod(need(i, "--warp-center-x-ratio"));
+            else if (a == "--warp-center-y-ratio") opt.warp_center_y_ratio = std::stod(need(i, "--warp-center-y-ratio"));
             else if (a == "--tag-family") opt.tag_family = need(i, "--tag-family");
             else if (a == "--target-id") opt.target_id = std::stoi(need(i, "--target-id"));
             else if (a == "--require-target-id") opt.require_target_id = parse_bool(need(i, "--require-target-id"));
@@ -423,6 +479,12 @@ int main(int argc, char** argv) {
             else if (a == "--red-fallback-center-x") opt.dynamic_red.fallback_center_x = std::stoi(need(i, "--red-fallback-center-x"));
             else if (a == "--red-center-alpha") opt.dynamic_red.center_alpha = std::stod(need(i, "--red-center-alpha"));
             else if (a == "--red-show-mask-window") opt.dynamic_red.show_mask_window = parse_bool(need(i, "--red-show-mask-window"));
+            else if (a == "--red-require-dual-zone") opt.dynamic_red.require_dual_zone = parse_bool(need(i, "--red-require-dual-zone"));
+            else if (a == "--red-zone-gap-px") opt.dynamic_red.zone_gap_px = std::stoi(need(i, "--red-zone-gap-px"));
+            else if (a == "--red-zone-min-pixels") opt.dynamic_red.zone_min_pixels = std::stoi(need(i, "--red-zone-min-pixels"));
+            else if (a == "--red-zone-min-ratio") opt.dynamic_red.zone_min_ratio = std::stod(need(i, "--red-zone-min-ratio"));
+            else if (a == "--red-band-min-pixels") opt.dynamic_red.band_min_pixels = std::stoi(need(i, "--red-band-min-pixels"));
+            else if (a == "--red-band-min-ratio") opt.dynamic_red.band_min_ratio = std::stod(need(i, "--red-band-min-ratio"));
 
             else if (a == "--model-enable") opt.model_cfg.enable = parse_bool(need(i, "--model-enable"));
             else if (a == "--model-backend") opt.model_cfg.backend = need(i, "--model-backend");

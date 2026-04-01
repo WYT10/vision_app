@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <opencv2/imgcodecs.hpp>
 
@@ -63,6 +65,7 @@ struct AppOptions {
     bool ui = true;
     int duration = 10;
     bool draw_overlay = true;
+    bool text_console = true;
 
     int camera_soft_max = 1000;
     int camera_preview_max = 640;
@@ -71,6 +74,8 @@ struct AppOptions {
     int warp_width = 384;
     int warp_height = 384;
     int target_tag_px = 128;
+    double warp_center_x_ratio = 0.5;
+    double warp_center_y_ratio = 0.5;
 
     std::string tag_family = "auto";
     int target_id = 0;
@@ -122,6 +127,9 @@ Dynamic-red-x tuning
   a / d         : image ROI width - / +
   z / x         : image ROI height - / +
   j / l         : gap above band - / +
+  n / b         : dual-zone mid gap - / +
+  c / v         : zone min red pixels - / +
+  f / g         : zone min red ratio - / +
   [ / ]         : dynamic pixel step down / up
 
 General
@@ -196,7 +204,11 @@ inline std::string dynamic_param_status(const DynamicRedRoiConfig& cfg, int step
     std::ostringstream oss;
     oss << "band=[" << cfg.band_y0 << ',' << cfg.band_y1 << ") h=" << (cfg.band_y1 - cfg.band_y0)
         << " gap=" << cfg.roi_gap_above_band
-        << " roi=" << cfg.roi_width << 'x' << cfg.roi_height;
+        << " roi=" << cfg.roi_width << 'x' << cfg.roi_height
+        << " dual=" << (cfg.require_dual_zone ? "on" : "off")
+        << " zone_gap=" << cfg.zone_gap_px
+        << " zone_px>=" << cfg.zone_min_pixels
+        << " zone_ratio>=" << std::fixed << std::setprecision(3) << cfg.zone_min_ratio;
     if (step_px > 0) oss << " step=" << step_px;
     return oss.str();
 }
@@ -207,12 +219,116 @@ inline std::string red_status_text(const RoiRuntimeData& roi_info) {
     }
     std::ostringstream oss;
     oss << "red_ratio=" << std::to_string(roi_info.red_ratio).substr(0, 6);
+    if (roi_info.left_zone_found) oss << " L=" << roi_info.left_zone_center_x << "(" << roi_info.left_zone_red_pixels << "," << std::fixed << std::setprecision(3) << roi_info.left_zone_red_ratio << ")";
+    else oss << " L=miss(" << roi_info.left_zone_red_pixels << "," << std::fixed << std::setprecision(3) << roi_info.left_zone_red_ratio << ")";
+    if (roi_info.right_zone_found) oss << " R=" << roi_info.right_zone_center_x << "(" << roi_info.right_zone_red_pixels << "," << std::fixed << std::setprecision(3) << roi_info.right_zone_red_ratio << ")";
+    else oss << " R=miss(" << roi_info.right_zone_red_pixels << "," << std::fixed << std::setprecision(3) << roi_info.right_zone_red_ratio << ")";
     if (roi_info.red_center_x >= 0) oss << " cx=" << roi_info.red_center_x;
-    if (roi_info.red_found) oss << " found";
-    else if (roi_info.used_last_center) oss << " hold-last";
-    else if (roi_info.used_fallback_center) oss << " fallback";
-    else oss << " none";
+    if (roi_info.dual_zone_triggered || roi_info.trigger_ready) oss << " trigger=ready";
+    else oss << " trigger=wait";
     return oss.str();
+}
+
+inline std::vector<std::string> wrap_console_line(const std::string& line, int max_chars) {
+    std::vector<std::string> out;
+    if (max_chars <= 8 || static_cast<int>(line.size()) <= max_chars) {
+        out.push_back(line);
+        return out;
+    }
+    std::string remaining = line;
+    while (!remaining.empty()) {
+        if (static_cast<int>(remaining.size()) <= max_chars) {
+            out.push_back(remaining);
+            break;
+        }
+        int cut = max_chars;
+        for (int i = max_chars; i > max_chars / 2; --i) {
+            if (remaining[static_cast<size_t>(i)] == ' ') { cut = i; break; }
+        }
+        out.push_back(remaining.substr(0, static_cast<size_t>(cut)));
+        size_t next = static_cast<size_t>(cut);
+        while (next < remaining.size() && remaining[next] == ' ') ++next;
+        remaining = remaining.substr(next);
+    }
+    return out;
+}
+
+inline void show_text_console(const std::string& window_name,
+                              const std::vector<std::string>& lines,
+                              int min_w = 560,
+                              int min_h = 420) {
+    int W = min_w;
+    int H = min_h;
+    try {
+        const cv::Rect r = cv::getWindowImageRect(window_name);
+        if (r.width > 64) W = r.width;
+        if (r.height > 64) H = r.height;
+    } catch (...) {}
+    cv::Mat canvas(H, W, CV_8UC3, cv::Scalar(18, 18, 18));
+    const int margin = 12;
+    const int line_h = 20;
+    const int max_chars = std::max(18, (W - 2 * margin) / 8);
+    int y = margin + 18;
+    for (const auto& line : lines) {
+        for (const auto& wrapped : wrap_console_line(line, max_chars)) {
+            if (y > H - margin) break;
+            cv::putText(canvas, wrapped, {margin, y}, cv::FONT_HERSHEY_SIMPLEX, 0.48, cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
+            y += line_h;
+        }
+        if (y > H - margin) break;
+    }
+    cv::imshow(window_name, canvas);
+}
+
+inline std::vector<std::string> build_calibrate_console_lines(bool locked,
+                                                              const std::string& roi_mode,
+                                                              const DynamicRedRoiConfig& dynamic_cfg,
+                                                              const RoiRuntimeData* runtime,
+                                                              const WarpPackage& locked_pack,
+                                                              int dynamic_step_px) {
+    std::vector<std::string> lines;
+    lines.push_back("calibrate | lock=" + std::string(locked ? "locked" : "search") + " | roi_mode=" + roi_mode);
+    if (locked_pack.valid) {
+        lines.push_back("warp=" + std::to_string(locked_pack.warp_size.width) + "x" + std::to_string(locked_pack.warp_size.height) +
+                        " tag_px=" + std::to_string(locked_pack.target_tag_px) +
+                        " id=" + std::to_string(locked_pack.id));
+    }
+    if (is_dynamic_roi_mode(roi_mode)) {
+        lines.push_back(dynamic_param_status(dynamic_cfg, dynamic_step_px));
+        if (runtime) lines.push_back(red_status_text(*runtime));
+        lines.push_back("keys dyn: w/s band, i/k band_h, a/d roi_w, z/x roi_h, j/l gap, n/b zone_gap, c/v zone_px, f/g zone_ratio, [/] step");
+    } else {
+        lines.push_back("keys fixed: 1/2 select roi, wasd move, ijkl size, [ ] move-step, , . size-step");
+    }
+    lines.push_back("general: SPACE lock, u unlock, m mode, p save-all, y save-warp, o save-rois, r reset, q quit");
+    return lines;
+}
+
+inline std::vector<std::string> build_deploy_console_lines(const std::string& roi_mode,
+                                                           const DynamicRedRoiConfig& dynamic_cfg,
+                                                           const RoiRuntimeData* runtime,
+                                                           const std::string& cfg_warn,
+                                                           int dynamic_step_px,
+                                                           double warp_ms,
+                                                           double roi_ms,
+                                                           double model_ms) {
+    std::vector<std::string> lines;
+    lines.push_back("deploy | roi_mode=" + roi_mode);
+    if (!cfg_warn.empty()) lines.push_back(cfg_warn);
+    if (is_dynamic_roi_mode(roi_mode)) {
+        lines.push_back(dynamic_param_status(dynamic_cfg, dynamic_step_px));
+        if (runtime) lines.push_back(red_status_text(*runtime));
+        lines.push_back("trigger rule: both left+right zones need valid blobs AND enough red portion before image ROI is emitted");
+        lines.push_back("keys dyn: m mode, w/s band, i/k band_h, a/d roi_w, z/x roi_h, j/l gap, n/b zone_gap, c/v zone_px, f/g zone_ratio, [/] step");
+    } else {
+        if (runtime) lines.push_back(red_status_text(*runtime));
+        lines.push_back("keys: m mode, q quit");
+    }
+    std::ostringstream perf;
+    perf << "timing ms | warp=" << std::fixed << std::setprecision(3) << warp_ms
+         << " roi=" << roi_ms << " model=" << model_ms;
+    lines.push_back(perf.str());
+    return lines;
 }
 
 inline void draw_runtime_roi_overlay(cv::Mat& img,
@@ -238,9 +354,18 @@ inline void draw_runtime_roi_overlay(cv::Mat& img,
     cv::putText(img, "red_band", search_rect.tl() + cv::Point(4, 20),
                 cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 180, 255), 2);
 
-    cv::rectangle(img, image_rect, cv::Scalar(255, 0, 0), 2);
-    cv::putText(img, "dynamic_image_roi", image_rect.tl() + cv::Point(4, 20),
-                cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(255, 0, 0), 2);
+    const cv::Rect left_zone = (runtime && runtime->dynamic_left_zone_rect.area() > 0)
+        ? runtime->dynamic_left_zone_rect : dynamic_left_zone_rect(dynamic_cfg, img.size());
+    const cv::Rect right_zone = (runtime && runtime->dynamic_right_zone_rect.area() > 0)
+        ? runtime->dynamic_right_zone_rect : dynamic_right_zone_rect(dynamic_cfg, img.size());
+    cv::rectangle(img, left_zone, cv::Scalar(80, 180, 255), 1);
+    cv::rectangle(img, right_zone, cv::Scalar(80, 180, 255), 1);
+
+    if (runtime && runtime->dynamic_image_rect.area() > 0) {
+        cv::rectangle(img, image_rect, cv::Scalar(255, 0, 0), 2);
+        cv::putText(img, "dynamic_image_roi", image_rect.tl() + cv::Point(4, 20),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(255, 0, 0), 2);
+    }
 
     const int center_x = (runtime && runtime->red_center_x >= 0) ? runtime->red_center_x : preview_center_x;
     cv::line(img, cv::Point(center_x, search_rect.y), cv::Point(center_x, search_rect.y + search_rect.height),
@@ -250,12 +375,10 @@ inline void draw_runtime_roi_overlay(cv::Mat& img,
 
     if (runtime) {
         cv::putText(img, red_status_text(*runtime), {12, 76},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.52, cv::Scalar(0, 120, 0), 2);
-        cv::putText(img, dynamic_param_status(dynamic_cfg, 0), {12, 96},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 120, 0), 1);
+                    cv::FONT_HERSHEY_SIMPLEX, 0.48, cv::Scalar(0, 120, 0), 1);
     } else {
         cv::putText(img, dynamic_param_status(dynamic_cfg, 0), {12, 76},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 120, 0), 1);
+                    cv::FONT_HERSHEY_SIMPLEX, 0.42, cv::Scalar(0, 120, 0), 1);
     }
 }
 
@@ -301,8 +424,10 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
     if (opt.ui) {
         cv::namedWindow("vision_app_camera", cv::WINDOW_NORMAL);
         cv::namedWindow("vision_app_warp", cv::WINDOW_NORMAL);
+        if (opt.text_console) cv::namedWindow("vision_app_text", cv::WINDOW_NORMAL);
         cv::resizeWindow("vision_app_camera", opt.camera_preview_max, std::max(240, opt.camera_preview_max * 3 / 4));
         cv::resizeWindow("vision_app_warp", opt.warp_preview_max, opt.warp_preview_max);
+        if (opt.text_console) cv::resizeWindow("vision_app_text", 760, 420);
         if (dynamic_cfg.show_mask_window) cv::namedWindow("vision_app_red_mask", cv::WINDOW_NORMAL);
         print_calibrate_controls();
     }
@@ -319,7 +444,7 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
             const bool stable = locker.update(cur);
             if (!opt.manual_lock_only && stable && cur.found) {
                 if (build_warp_package_from_detection(cur, frame.size(), opt.warp_width, opt.warp_height,
-                                                     opt.target_tag_px, locked_pack, err)) {
+                                                     opt.target_tag_px, opt.warp_center_x_ratio, opt.warp_center_y_ratio, locked_pack, err)) {
                     locked = true;
                     locked_det = cur;
                     std::cout << "\n[lock] auto lock family=" << locked_det.family << " id=" << locked_det.id << "\n";
@@ -341,7 +466,7 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
                 std::string werr;
                 WarpPackage temp_pack;
                 if (build_warp_package_from_detection(cur, frame.size(), opt.warp_width, opt.warp_height,
-                                                     opt.target_tag_px, temp_pack, werr)) {
+                                                     opt.target_tag_px, opt.warp_center_x_ratio, opt.warp_center_y_ratio, temp_pack, werr)) {
                     cv::Mat temp_valid;
                     if (apply_warp(frame, temp_pack, temp_preview, &temp_valid)) {
                         if (opt.draw_overlay) {
@@ -385,7 +510,8 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
                                            locked_pack.target_tag_px, roi_mode.c_str()),
                                 {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.52, cv::Scalar(0,120,0), 2);
                 }
-                if (model_ready && opt.run_model) {
+                if (!roi_info.trigger_ready) model_res = {};
+                if (model_ready && opt.run_model && roi_info.trigger_ready) {
                     std::string merr;
                     if (!run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
                         model_res = {};
@@ -408,6 +534,9 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
         if (opt.ui) {
             cv::imshow("vision_app_camera", downscale_for_preview(camera_show, opt.camera_preview_max));
             cv::imshow("vision_app_warp", downscale_for_preview(warp_show, opt.warp_preview_max));
+            if (opt.text_console) {
+                show_text_console("vision_app_text", build_calibrate_console_lines(locked, roi_mode, dynamic_cfg, locked ? &roi_info : nullptr, locked_pack, dynamic_step_px));
+            }
         }
 
         ++frame_idx;
@@ -432,7 +561,7 @@ inline bool run_calibrate(const AppOptions& opt, std::string& err) {
         if (key == ' ' || key == 13) {
             if (cur.found) {
                 if (build_warp_package_from_detection(cur, frame.size(), opt.warp_width, opt.warp_height,
-                                                     opt.target_tag_px, locked_pack, err)) {
+                                                     opt.target_tag_px, opt.warp_center_x_ratio, opt.warp_center_y_ratio, locked_pack, err)) {
                     locked = true;
                     dynamic_state.reset();
                     locked_det = cur;
@@ -552,8 +681,10 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
     if (opt.ui) {
         cv::namedWindow("vision_app_camera", cv::WINDOW_NORMAL);
         cv::namedWindow("vision_app_warp", cv::WINDOW_NORMAL);
+        if (opt.text_console) cv::namedWindow("vision_app_text", cv::WINDOW_NORMAL);
         cv::resizeWindow("vision_app_camera", opt.camera_preview_max, std::max(240, opt.camera_preview_max * 3 / 4));
         cv::resizeWindow("vision_app_warp", opt.warp_preview_max, opt.warp_preview_max);
+        if (opt.text_console) cv::resizeWindow("vision_app_text", 760, 420);
         if (dynamic_cfg.show_mask_window) cv::namedWindow("vision_app_red_mask", cv::WINDOW_NORMAL);
     }
     std::cout << "\n=== vision_app deploy ===\n"
@@ -582,10 +713,11 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         warp_show = warped.clone();
 
         std::string rerr;
+        double roi_ms = 0.0;
         auto roi_t0 = Clock::now();
         if (extract_runtime_rois(warped, valid, roi_mode, rois, opt.red_cfg, dynamic_cfg,
                                  dynamic_state, roi_info, rerr)) {
-            const double roi_ms = std::chrono::duration<double, std::milli>(Clock::now() - roi_t0).count();
+            roi_ms = std::chrono::duration<double, std::milli>(Clock::now() - roi_t0).count();
             if (opt.draw_overlay) {
                 draw_runtime_roi_overlay(warp_show, rois, dynamic_cfg, roi_mode, -1, &roi_info);
                 cv::putText(warp_show, cv::format("DEPLOY family=%s id=%d mode=%s",
@@ -610,7 +742,8 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
                 hz_ok = dt >= (1.0 / opt.model_max_hz);
             }
 
-            if (model_ready && opt.run_model && opt.run_image_roi && stride_ok && hz_ok) {
+            if (!roi_info.trigger_ready) model_res = {};
+            if (model_ready && opt.run_model && opt.run_image_roi && roi_info.trigger_ready && stride_ok && hz_ok) {
                 std::string merr;
                 if (!run_model_on_image_roi(roi_info, opt.model_cfg, model_res, merr)) {
                     model_res = {};
@@ -651,6 +784,9 @@ inline bool run_deploy(const AppOptions& opt, std::string& err) {
         if (opt.ui) {
             cv::imshow("vision_app_camera", downscale_for_preview(camera_show, opt.camera_preview_max));
             cv::imshow("vision_app_warp", downscale_for_preview(warp_show, opt.warp_preview_max));
+            if (opt.text_console) {
+                show_text_console("vision_app_text", build_deploy_console_lines(roi_mode, dynamic_cfg, &roi_info, cfg_warn, dynamic_step_px, warp_ms, roi_ms, model_res.infer_ms));
+            }
         }
 
         ++frame_idx;

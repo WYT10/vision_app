@@ -185,3 +185,23 @@ You will see:
 - `src/model.cpp` / `src/model.hpp` — classifier runtime facade
 - `docs/FUNCTIONS.md` — function inventory
 - `tools/` — dataset + training + export helpers
+
+
+## New in this pack
+
+- dynamic-red-x can require red in both left/right zones before emitting image ROI
+- separate `vision_app_text` window for wrapped status / controls text
+- config relative paths resolve relative to the config file location
+- warp target position can be biased with `warp_center_x_ratio` / `warp_center_y_ratio` to leave more room below the tag
+
+
+## Dynamic red trigger hardening
+
+Dynamic red-x mode now supports additional gates so random small red noise does not arm the trigger:
+
+- `red_zone_min_pixels`: minimum red pixels required in each trigger zone
+- `red_zone_min_ratio`: minimum red fraction required in each trigger zone
+- `red_band_min_pixels`: optional total red pixels required in the full band
+- `red_band_min_ratio`: optional total red fraction required in the full band
+
+A zone only counts when it has both a valid blob and enough red mass.

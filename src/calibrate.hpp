@@ -49,6 +49,12 @@ struct DynamicRedRoiConfig {
     int fallback_center_x = -1; // <0 => search-band center
     double center_alpha = 0.70; // new-detection smoothing weight
     bool show_mask_window = false;
+    bool require_dual_zone = true;
+    int zone_gap_px = 0;     // gap around the band midline between left/right trigger zones
+    int zone_min_pixels = 24;     // absolute red pixels required per trigger zone
+    double zone_min_ratio = 0.015; // red fraction required per trigger zone
+    int band_min_pixels = 0;      // optional absolute red pixels required in the whole band
+    double band_min_ratio = 0.0;  // optional red fraction required in the whole band
 };
 
 struct WarpPackage {
@@ -199,6 +205,21 @@ inline cv::Rect dynamic_search_rect(const DynamicRedRoiConfig& cfg, const cv::Si
     return {x0, y0, x1 - x0, y1 - y0};
 }
 
+inline cv::Rect dynamic_left_zone_rect(const DynamicRedRoiConfig& cfg, const cv::Size& sz) {
+    const cv::Rect full = dynamic_search_rect(cfg, sz);
+    const int gap = std::clamp(cfg.zone_gap_px, 0, std::max(0, full.width - 2));
+    const int left_w = std::max(1, (full.width - gap) / 2);
+    return {full.x, full.y, left_w, full.height};
+}
+
+inline cv::Rect dynamic_right_zone_rect(const DynamicRedRoiConfig& cfg, const cv::Size& sz) {
+    const cv::Rect full = dynamic_search_rect(cfg, sz);
+    const int gap = std::clamp(cfg.zone_gap_px, 0, std::max(0, full.width - 2));
+    const int left_w = std::max(1, (full.width - gap) / 2);
+    const int right_x = full.x + full.width - left_w;
+    return {right_x, full.y, std::max(1, full.width - (right_x - full.x)), full.height};
+}
+
 inline int dynamic_image_roi_top_y(const DynamicRedRoiConfig& cfg) {
     if (cfg.roi_anchor_y >= 0) return cfg.roi_anchor_y;
     return cfg.band_y0 - std::max(0, cfg.roi_gap_above_band) - std::max(1, cfg.roi_height);
@@ -227,6 +248,11 @@ inline void clamp_dynamic_red_cfg(DynamicRedRoiConfig& cfg, const cv::Size& sz) 
     if ((cfg.morph_k % 2) == 0) ++cfg.morph_k;
     cfg.miss_tolerance = std::max(0, cfg.miss_tolerance);
     cfg.center_alpha = std::clamp(cfg.center_alpha, 0.0, 1.0);
+    cfg.zone_gap_px = std::clamp(cfg.zone_gap_px, 0, std::max(0, sz.width - 2));
+    cfg.zone_min_pixels = std::max(0, cfg.zone_min_pixels);
+    cfg.zone_min_ratio = std::clamp(cfg.zone_min_ratio, 0.0, 1.0);
+    cfg.band_min_pixels = std::max(0, cfg.band_min_pixels);
+    cfg.band_min_ratio = std::clamp(cfg.band_min_ratio, 0.0, 1.0);
 }
 
 inline void tune_dynamic_red_cfg(DynamicRedRoiConfig& cfg, int key, int step_px, const cv::Size& sz) {
@@ -242,6 +268,12 @@ inline void tune_dynamic_red_cfg(DynamicRedRoiConfig& cfg, int key, int step_px,
         case 'x': cfg.roi_height += s; cfg.roi_anchor_y = -1; break;
         case 'j': cfg.roi_gap_above_band = std::max(0, cfg.roi_gap_above_band - s); cfg.roi_anchor_y = -1; break;
         case 'l': cfg.roi_gap_above_band += s; cfg.roi_anchor_y = -1; break;
+        case 'n': cfg.zone_gap_px = std::max(0, cfg.zone_gap_px - s); break;
+        case 'b': cfg.zone_gap_px += s; break;
+        case 'c': cfg.zone_min_pixels = std::max(0, cfg.zone_min_pixels - s); break;
+        case 'v': cfg.zone_min_pixels += s; break;
+        case 'f': cfg.zone_min_ratio = std::max(0.0, cfg.zone_min_ratio - 0.005); break;
+        case 'g': cfg.zone_min_ratio += 0.005; break;
         default: return;
     }
     clamp_dynamic_red_cfg(cfg, sz);
@@ -274,6 +306,12 @@ inline bool save_rois_yaml(const std::string& path,
         fs << "fallback_center_x" << dyn->fallback_center_x;
         fs << "center_alpha" << dyn->center_alpha;
         fs << "show_mask_window" << static_cast<int>(dyn->show_mask_window ? 1 : 0);
+        fs << "require_dual_zone" << static_cast<int>(dyn->require_dual_zone ? 1 : 0);
+        fs << "zone_gap_px" << dyn->zone_gap_px;
+        fs << "zone_min_pixels" << dyn->zone_min_pixels;
+        fs << "zone_min_ratio" << dyn->zone_min_ratio;
+        fs << "band_min_pixels" << dyn->band_min_pixels;
+        fs << "band_min_ratio" << dyn->band_min_ratio;
         fs << "}";
     }
     if (roi_mode) fs << "roi_mode" << normalize_roi_mode(*roi_mode);
@@ -314,6 +352,14 @@ inline bool load_rois_yaml(const std::string& path,
             int show_mask_window = dyn->show_mask_window ? 1 : 0;
             if (!n["show_mask_window"].empty()) n["show_mask_window"] >> show_mask_window;
             dyn->show_mask_window = show_mask_window != 0;
+            int require_dual_zone = dyn->require_dual_zone ? 1 : 0;
+            if (!n["require_dual_zone"].empty()) n["require_dual_zone"] >> require_dual_zone;
+            dyn->require_dual_zone = require_dual_zone != 0;
+            if (!n["zone_gap_px"].empty()) n["zone_gap_px"] >> dyn->zone_gap_px;
+            if (!n["zone_min_pixels"].empty()) n["zone_min_pixels"] >> dyn->zone_min_pixels;
+            if (!n["zone_min_ratio"].empty()) n["zone_min_ratio"] >> dyn->zone_min_ratio;
+            if (!n["band_min_pixels"].empty()) n["band_min_pixels"] >> dyn->band_min_pixels;
+            if (!n["band_min_ratio"].empty()) n["band_min_ratio"] >> dyn->band_min_ratio;
             clamp_dynamic_red_cfg(*dyn, cv::Size(4096, 4096));
         }
     }
@@ -330,6 +376,8 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
                                                           int canvas_width,
                                                           int canvas_height,
                                                           int target_tag_px,
+                                                          double target_center_x_ratio,
+                                                          double target_center_y_ratio,
                                                           WarpPackage& pack,
                                                           std::string& err) {
     pack = {};
@@ -342,8 +390,8 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
     int W = std::clamp(canvas_width, 128, 2048);
     int H = std::clamp(canvas_height, 128, 2048);
     int L = std::clamp(target_tag_px, 16, std::min(W, H) - 2);
-    const double cx = 0.5 * static_cast<double>(W);
-    const double cy = 0.5 * static_cast<double>(H);
+    const double cx = std::clamp(target_center_x_ratio, 0.05, 0.95) * static_cast<double>(W);
+    const double cy = std::clamp(target_center_y_ratio, 0.05, 0.95) * static_cast<double>(H);
     const double half = 0.5 * static_cast<double>(L);
 
     std::vector<cv::Point2f> src_quad(4), dst_quad(4);
@@ -403,9 +451,13 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
                                               int warp_width,
                                               int warp_height,
                                               int target_tag_px,
+                                              double target_center_x_ratio,
+                                              double target_center_y_ratio,
                                               WarpPackage& pack,
                                               std::string& err) {
-    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height, target_tag_px, pack, err);
+    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height,
+                                                         target_tag_px, target_center_x_ratio,
+                                                         target_center_y_ratio, pack, err);
 }
 
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {
