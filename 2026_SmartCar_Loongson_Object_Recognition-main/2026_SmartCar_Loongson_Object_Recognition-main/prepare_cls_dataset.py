@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import os
 import random
-import shutil
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -27,6 +27,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "generated_datasets"
 OUTPUT_PREFIX = "dataset_cls"
 DATASET_VERSION = "v3"
 AUTO_NAME_OUTPUT = True
+RUN_DATE_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 SEED = 42
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -35,6 +36,9 @@ INCLUDE_SPECIAL_CHAR_FOLDER = False
 
 # Final ROI / model input size
 TARGET_SIZE = 40
+
+# Blur tuning for transformed variants.
+BLUR_STRENGTH_MULTIPLIER = 2.0
 
 # REQUIRED BEHAVIOR:
 # each source image creates 5 images in each split
@@ -75,6 +79,7 @@ def build_dataset_folder_name() -> str:
     return (
         f"{OUTPUT_PREFIX}"
         f"__{DATASET_VERSION}"
+        f"__dt{RUN_DATE_TAG}"
         f"__px{TARGET_SIZE}"
         f"__tr{VERSIONS_PER_SPLIT['train']}"
         f"__va{VERSIONS_PER_SPLIT['val']}"
@@ -144,7 +149,9 @@ def map_char_class_name(img_path: Path) -> str:
 
 def ensure_clean_output(out_dir: Path) -> None:
     if out_dir.exists():
-        shutil.rmtree(out_dir)
+        raise FileExistsError(
+            f"Output directory already exists, refusing to overwrite: {out_dir}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     for split in ("train", "val", "test"):
         (out_dir / split).mkdir(parents=True, exist_ok=True)
@@ -219,8 +226,8 @@ def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:
         img = TF.adjust_saturation(img, rng.uniform(0.9, 1.1))
 
     # Always add blur to transformed variants to improve robustness.
-    k = rng.choice([3, 5, 7])
-    sigma = rng.uniform(0.2, 1.5)
+    k = rng.choice([5, 7, 9])
+    sigma = rng.uniform(0.2, 1.5) * BLUR_STRENGTH_MULTIPLIER
     img = TF.gaussian_blur(img, kernel_size=[k, k], sigma=[sigma, sigma])
 
     return img
