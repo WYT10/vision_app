@@ -2,9 +2,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageEnhance
 from pathlib import Path
 import random
+from torchvision.transforms import functional as TF
+from torchvision.transforms import InterpolationMode
 
 class AugmentationTuner:
     def __init__(self, root):
@@ -55,8 +57,10 @@ class AugmentationTuner:
         # Buttons to add operations
         btn_frame = ttk.Frame(right_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(btn_frame, text="Add Salt-Pepper (a)", command=lambda: self.add_op("sp")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Add Median Blur (b)", command=lambda: self.add_op("mb")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Add Salt-Pepper", command=lambda: self.add_op("sp")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Add Median Blur", command=lambda: self.add_op("mb")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Add Resize", command=lambda: self.add_op("rs")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Add Affine", command=lambda: self.add_op("af")).pack(side=tk.LEFT, padx=2)
         
         # Scrollable area for operations
         self.ops_canvas = tk.Canvas(right_frame)
@@ -102,9 +106,13 @@ class AugmentationTuner:
 
     def add_op(self, op_type):
         if op_type == "sp":
-            op = {"type": "sp", "amount": 0.01, "ratio": 0.5, "seed": 42}
-        else:
+            op = {"type": "sp", "amount": 0.05, "ratio": 0.5, "seed": 42, "dot_size": 2}
+        elif op_type == "mb":
             op = {"type": "mb", "k": 3}
+        elif op_type == "rs":
+            op = {"type": "rs", "size": 40}
+        elif op_type == "af":
+            op = {"type": "af", "angle": 0.0, "tx": 0.0, "ty": 0.0, "scale": 1.0, "shear": 0.0}
             
         self.sequence.append(op)
         self.rebuild_op_ui()
@@ -136,9 +144,9 @@ class AugmentationTuner:
             ctrl_frame.pack(fill=tk.X, padx=2, pady=2)
             
             if op['type'] == 'sp':
-                ttk.Label(ctrl_frame, text="Amount (0.0..0.20):").pack(side=tk.TOP, anchor=tk.W)
+                ttk.Label(ctrl_frame, text="Amount (0.0..1.0):").pack(side=tk.TOP, anchor=tk.W)
                 amount_var = tk.DoubleVar(value=op['amount'])
-                s1 = ttk.Scale(ctrl_frame, from_=0.0, to=0.20, variable=amount_var, command=lambda v, idx=i: self.on_param_change(idx, 'amount', v))
+                s1 = ttk.Scale(ctrl_frame, from_=0.0, to=1.0, variable=amount_var, command=lambda v, idx=i: self.on_param_change(idx, 'amount', v))
                 s1.pack(fill=tk.X)
                 
                 ttk.Label(ctrl_frame, text="Ratio S/P (0.0..1.0):").pack(side=tk.TOP, anchor=tk.W)
@@ -151,11 +159,48 @@ class AugmentationTuner:
                 s3 = ttk.Scale(ctrl_frame, from_=0, to=100, variable=seed_var, command=lambda v, idx=i: self.on_param_change(idx, 'seed', v))
                 s3.pack(fill=tk.X)
                 
+                ttk.Label(ctrl_frame, text="Dot Size (1..50):").pack(side=tk.TOP, anchor=tk.W)
+                dot_hz_var = tk.IntVar(value=op.get('dot_size', 2))
+                s4 = ttk.Scale(ctrl_frame, from_=1, to=50, variable=dot_hz_var, command=lambda v, idx=i: self.on_param_change(idx, 'dot_size', v))
+                s4.pack(fill=tk.X)
+                
             elif op['type'] == 'mb':
-                ttk.Label(ctrl_frame, text="Kernel Size (1..31):").pack(side=tk.TOP, anchor=tk.W)
+                ttk.Label(ctrl_frame, text="Kernel Size (1..41):").pack(side=tk.TOP, anchor=tk.W)
                 k_var = tk.IntVar(value=op['k'])
-                s1 = ttk.Scale(ctrl_frame, from_=1, to=31, variable=k_var, command=lambda v, idx=i: self.on_param_change(idx, 'k', v))
+                s1 = ttk.Scale(ctrl_frame, from_=1, to=41, variable=k_var, command=lambda v, idx=i: self.on_param_change(idx, 'k', v))
                 s1.pack(fill=tk.X)
+                
+            elif op['type'] == 'rs':
+                ttk.Label(ctrl_frame, text="Size (10..200):").pack(side=tk.TOP, anchor=tk.W)
+                size_var = tk.IntVar(value=op['size'])
+                s1 = ttk.Scale(ctrl_frame, from_=10, to=200, variable=size_var, command=lambda v, idx=i: self.on_param_change(idx, 'size', v))
+                s1.pack(fill=tk.X)
+
+            elif op['type'] == 'af':
+                ttk.Label(ctrl_frame, text="Angle (-180..180):").pack(side=tk.TOP, anchor=tk.W)
+                a_var = tk.DoubleVar(value=op['angle'])
+                s1 = ttk.Scale(ctrl_frame, from_=-180.0, to=180.0, variable=a_var, command=lambda v, idx=i: self.on_param_change(idx, 'angle', v))
+                s1.pack(fill=tk.X)
+
+                ttk.Label(ctrl_frame, text="Translate X (-0.5..0.5):").pack(side=tk.TOP, anchor=tk.W)
+                tx_var = tk.DoubleVar(value=op['tx'])
+                s2 = ttk.Scale(ctrl_frame, from_=-0.5, to=0.5, variable=tx_var, command=lambda v, idx=i: self.on_param_change(idx, 'tx', v))
+                s2.pack(fill=tk.X)
+
+                ttk.Label(ctrl_frame, text="Translate Y (-0.5..0.5):").pack(side=tk.TOP, anchor=tk.W)
+                ty_var = tk.DoubleVar(value=op['ty'])
+                s3 = ttk.Scale(ctrl_frame, from_=-0.5, to=0.5, variable=ty_var, command=lambda v, idx=i: self.on_param_change(idx, 'ty', v))
+                s3.pack(fill=tk.X)
+
+                ttk.Label(ctrl_frame, text="Scale (0.5..2.0):").pack(side=tk.TOP, anchor=tk.W)
+                sc_var = tk.DoubleVar(value=op['scale'])
+                s4 = ttk.Scale(ctrl_frame, from_=0.5, to=2.0, variable=sc_var, command=lambda v, idx=i: self.on_param_change(idx, 'scale', v))
+                s4.pack(fill=tk.X)
+
+                ttk.Label(ctrl_frame, text="Shear (-90..90):").pack(side=tk.TOP, anchor=tk.W)
+                sh_var = tk.DoubleVar(value=op['shear'])
+                s5 = ttk.Scale(ctrl_frame, from_=-90.0, to=90.0, variable=sh_var, command=lambda v, idx=i: self.on_param_change(idx, 'shear', v))
+                s5.pack(fill=tk.X)
 
             # Move/Delete buttons
             action_frame = ttk.Frame(frame)
@@ -182,7 +227,7 @@ class AugmentationTuner:
             if val % 2 == 0:
                 val += 1
             if val < 1: val = 1
-        if param == 'seed':
+        if param in ['seed', 'dot_size', 'size']:
             val = int(val)
             
         self.sequence[idx][param] = val
@@ -198,28 +243,35 @@ class AugmentationTuner:
             self.step_label.config(text="Current Step: 0 (Original)")
         else:
             op = self.sequence[step-1]
-            op_name = 'Salt-Pepper' if op['type']=='sp' else 'Median Blur'
+            if op['type'] == 'sp': op_name = 'Salt-Pepper'
+            elif op['type'] == 'mb': op_name = 'Median Blur'
+            elif op['type'] == 'rs': op_name = 'Resize'
+            else: op_name = 'Affine Transform'
             self.step_label.config(text=f"Current Step: {step} ({op_name})")
 
-    def _apply_sp(self, img_pil, amount, ratio, seed):
+    def _apply_sp(self, img_pil, amount, ratio, seed, dot_size=1):
         rng = random.Random(seed)
         img = np.array(img_pil).copy()
         h, w, _ = img.shape
+        
+        # Calculate how many dots to place to hit our target total pixels
         total_pixels = h * w
         noisy_pixels = max(1, int(total_pixels * amount))
+        num_dots = max(1, int(noisy_pixels / (dot_size * dot_size)))
 
-        num_salt = int(noisy_pixels * ratio)
-        num_pepper = max(0, noisy_pixels - num_salt)
+        num_salt = int(num_dots * ratio)
+        num_pepper = max(0, num_dots - num_salt)
 
-        if num_salt > 0:
-            ys = np.array([rng.randrange(h) for _ in range(num_salt)], dtype=np.int32)
-            xs = np.array([rng.randrange(w) for _ in range(num_salt)], dtype=np.int32)
-            img[ys, xs] = 255
+        for _ in range(num_salt):
+            y = rng.randrange(h)
+            x = rng.randrange(w)
+            # Use max/min so we don't index outside the array
+            img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 255
 
-        if num_pepper > 0:
-            ys = np.array([rng.randrange(h) for _ in range(num_pepper)], dtype=np.int32)
-            xs = np.array([rng.randrange(w) for _ in range(num_pepper)], dtype=np.int32)
-            img[ys, xs] = 0
+        for _ in range(num_pepper):
+            y = rng.randrange(h)
+            x = rng.randrange(w)
+            img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 0
 
         return Image.fromarray(img)
 
@@ -227,6 +279,28 @@ class AugmentationTuner:
         img = np.array(img_pil)
         img = cv2.medianBlur(img, k)
         return Image.fromarray(img)
+
+    def _apply_rs(self, img_pil, size):
+        return TF.resize(
+            img_pil,
+            [size, size],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+
+    def _apply_af(self, img_pil, angle, tx, ty, scale, shear):
+        w, h = img_pil.size
+        # TF.affine expects translate as absolute pixels: [tx * w, ty * h]
+        translate = [int(tx * w), int(ty * h)]
+        return TF.affine(
+            img_pil,
+            angle=angle,
+            translate=translate,
+            scale=scale,
+            shear=[shear, 0.0],
+            interpolation=InterpolationMode.BILINEAR,
+            fill=0,
+        )
 
     def update_pipeline(self):
         if self.original_image_bgr is None: return
@@ -243,9 +317,13 @@ class AugmentationTuner:
         
         for op in self.sequence:
             if op['type'] == 'sp':
-                current_pil = self._apply_sp(current_pil, op['amount'], op['ratio'], op.get('seed', 42))
+                current_pil = self._apply_sp(current_pil, op['amount'], op['ratio'], op.get('seed', 42), op.get('dot_size', 2))
             elif op['type'] == 'mb':
                 current_pil = self._apply_mb(current_pil, op['k'])
+            elif op['type'] == 'rs':
+                current_pil = self._apply_rs(current_pil, op['size'])
+            elif op['type'] == 'af':
+                current_pil = self._apply_af(current_pil, op['angle'], op['tx'], op['ty'], op['scale'], op['shear'])
             self.pipeline_images.append(current_pil)
             
         self.update_image_view()
