@@ -1,6 +1,8 @@
 
 #include "status_ui.hpp"
 
+#include <algorithm>
+
 #include <opencv2/imgproc.hpp>
 
 namespace vision_app {
@@ -23,6 +25,12 @@ cv::Mat build_status_panel(const std::string& title,
         y += line_height;
     }
     return panel;
+}
+
+cv::Mat make_blank_preview(int width, int height, const std::string& text) {
+    cv::Mat img(std::max(64, height), std::max(64, width), CV_8UC3, cv::Scalar(235, 235, 235));
+    cv::putText(img, text, {16, img.rows / 2}, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(60, 60, 60), 2, cv::LINE_AA);
+    return img;
 }
 
 } // namespace vision_app

@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <opencv2/imgcodecs.hpp>
+
 #include "app_config.hpp"
 #include "app_types.hpp"
 #include "camera.hpp"

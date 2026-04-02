@@ -14,4 +14,6 @@ cv::Mat build_status_panel(const std::string& title,
                            int line_height = 22,
                            int margin = 14);
 
+cv::Mat make_blank_preview(int width, int height, const std::string& text);
+
 } // namespace vision_app
