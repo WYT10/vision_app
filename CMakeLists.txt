@@ -1,3 +1,4 @@
+
 cmake_minimum_required(VERSION 3.16)
 project(vision_app LANGUAGES CXX)
 
@@ -7,19 +8,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc highgui videoio aruco imgcodecs)
+find_package(OpenCV 4.10 REQUIRED COMPONENTS core imgproc highgui videoio aruco imgcodecs)
 find_package(ONNXRuntime)
 find_package(ncnn)
 find_package(OpenMP)
 
 add_executable(vision_app
     src/main.cpp
-    src/roi_helper.cpp
+    src/app_config.cpp
+    src/status_ui.cpp
+    src/trigger.cpp
     src/model.cpp
 )
 
 target_include_directories(vision_app PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/vision_app
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake
 )
 

@@ -180,8 +180,6 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
                                                           int canvas_width,
                                                           int canvas_height,
                                                           int target_tag_px,
-                                                          double center_x_ratio,
-                                                          double center_y_ratio,
                                                           WarpPackage& pack,
                                                           std::string& err) {
     pack = {};
@@ -194,8 +192,8 @@ inline bool build_centered_warp_package_from_detection_px(const AprilTagDetectio
     int W = std::clamp(canvas_width, 128, 2048);
     int H = std::clamp(canvas_height, 128, 2048);
     int L = std::clamp(target_tag_px, 16, std::min(W, H) - 2);
-    const double cx = std::clamp(center_x_ratio, 0.05, 0.95) * static_cast<double>(W);
-    const double cy = std::clamp(center_y_ratio, 0.05, 0.95) * static_cast<double>(H);
+    const double cx = 0.5 * static_cast<double>(W);
+    const double cy = 0.5 * static_cast<double>(H);
     const double half = 0.5 * static_cast<double>(L);
 
     std::vector<cv::Point2f> src_quad(4), dst_quad(4);
@@ -255,21 +253,9 @@ inline bool build_warp_package_from_detection(const AprilTagDetection& det,
                                               int warp_width,
                                               int warp_height,
                                               int target_tag_px,
-                                              double center_x_ratio,
-                                              double center_y_ratio,
                                               WarpPackage& pack,
                                               std::string& err) {
-    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height, target_tag_px, center_x_ratio, center_y_ratio, pack, err);
-}
-
-inline bool build_warp_package_from_detection(const AprilTagDetection& det,
-                                              const cv::Size& src_size,
-                                              int warp_width,
-                                              int warp_height,
-                                              int target_tag_px,
-                                              WarpPackage& pack,
-                                              std::string& err) {
-    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height, target_tag_px, 0.5, 0.5, pack, err);
+    return build_centered_warp_package_from_detection_px(det, src_size, warp_width, warp_height, target_tag_px, pack, err);
 }
 
 inline bool apply_warp(const cv::Mat& src, const WarpPackage& pack, cv::Mat& dst, cv::Mat* out_valid = nullptr) {

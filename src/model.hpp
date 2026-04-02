@@ -1,6 +1,9 @@
 
 #pragma once
 #include <string>
+#include <vector>
+
+#include <opencv2/core.hpp>
 #include "calibrate.hpp"
 
 namespace vision_app {
@@ -40,22 +43,9 @@ struct RoiRuntimeData {
     cv::Mat red_mask;
     cv::Mat image_bgr;
     cv::Mat image_mask;
-    cv::Rect image_roi_rect{};
-    cv::Rect upper_zone_rect{};
-    cv::Rect lower_zone_rect{};
     double red_ratio = 0.0;
     int red_valid_pixels = 0;
     int image_valid_pixels = 0;
-    bool trigger_ready = false;
-    bool upper_valid = false;
-    bool lower_valid = false;
-    int upper_red_pixels = 0;
-    int lower_red_pixels = 0;
-    double upper_red_ratio = 0.0;
-    double lower_red_ratio = 0.0;
-    double x_upper = -1.0;
-    double x_lower = -1.0;
-    double x_center = -1.0;
 };
 
 bool init_model_runtime(const ModelConfig& cfg, std::string& err);

@@ -1,41 +1,53 @@
-# vision_app completed detailed v2
 
-This pack resets the app around a clearer machine:
+# vision_app
 
-`camera -> warp -> trigger -> roi synth -> optional model -> UI/report`
+A cleaned first-pass C++ vision app for:
+- `probe`: camera mode discovery via `v4l2-ctl`
+- `live`: raw preview or headless FPS test
+- `calibrate`: AprilTag lock + warp preview + trigger tuning
+- `deploy`: load saved warp/profile and run trigger + classifier
 
-## What is completed here
+This package keeps the current working atoms, but reorganizes the project around a cleaner profile/artifact split and a separate status window so numeric/debug text does not fight the preview bounds.
 
-- real CLI mode dispatch
-- config file loading with CLI override precedence
-- inline `# comment` stripping in config
-- relative config paths resolved relative to the config file location
-- `probe` tasks:
-  - `list`
-  - `live`
-  - `snap`
-  - `bench`
-- two ROI modes:
-  - `fixed`
-  - `dynamic_red_stacked`
-- dynamic trigger logic using **two stacked horizontal red zones**
-- dynamic image ROI synthesized **above the upper zone**
-- wrapped independent text window: `vision_app_text`
-- optional red mask window: `vision_app_red_mask`
-- warp center placement control via:
-  - `warp_center_x_ratio`
-  - `warp_center_y_ratio`
+## Project layout
 
-## What is still limited
-
-- not compile-verified in this environment
-- dynamic parameters are only saved through config/report, not a dedicated dynamic YAML profile yet
-- model path remains optional and disabled by default
+```text
+vision_app/
+├── CMakeLists.txt
+├── README.md
+├── cmake/
+│   └── FindONNXRuntime.cmake
+├── config/
+│   └── profile.example.conf
+├── report/
+└── src/
+    ├── app_config.hpp
+    ├── app_config.cpp
+    ├── app_types.hpp
+    ├── camera.hpp
+    ├── calibrate.hpp
+    ├── classifier_common.hpp
+    ├── deploy_runtime.hpp
+    ├── main.cpp
+    ├── model.hpp
+    ├── model.cpp
+    ├── ncnn_classifier.hpp
+    ├── onnx_classifier.hpp
+    ├── roi_helper.cpp
+    ├── stats.hpp
+    ├── status_ui.hpp
+    ├── status_ui.cpp
+    ├── trigger.hpp
+    └── trigger.cpp
+```
 
 ## Build
 
+Use this exactly:
+
 ```bash
 export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH
+
 cd ~/Desktop/vision_app
 rm -rf build
 mkdir -p build
@@ -44,54 +56,89 @@ cmake ..
 make -j$(nproc)
 ```
 
-## Typical runs
+## Runtime model
 
-Probe formats:
+There are two saved layers:
+
+1. **Profile config**: `config/profile.conf`
+   - camera assumptions
+   - tag lock policy
+   - trigger mode and parameters
+   - red thresholds
+   - model settings
+   - UI/text routing behavior
+
+2. **Derived warp artifact**: `report/warp_package.yml.gz`
+   - homography
+   - remap maps
+   - valid mask
+   - source size / warp size
+   - locked tag family/id
+
+This keeps the editable intent separate from the expensive precomputed warp.
+
+## Trigger modes
+
+### `fixed_rect`
+- tunes `red_roi` and `image_roi`
+- reports live `red_ratio`
+- triggers when `red_ratio >= red_ratio_threshold`
+
+### `dynamic_red_stacked`
+- tunes `upper_band`, `lower_band`, and derived image ROI size/offset
+- extracts a centerline from the red bands
+- first-pass derived image ROI is anchored **above the upper band**
+- this is a clean starting point, not a final tuned policy for every field layout
+
+## Text routing / overlays
+
+`text_sink` controls where debug information goes:
+- `overlay`
+- `status_window`
+- `terminal`
+- `split`
+
+Recommended default is `split`.
+
+This keeps image windows for geometry and uses the status window for numeric state.
+
+## Example commands
 
 ```bash
-./vision_app --mode probe --probe-task list --device /dev/video0
+./vision_app --mode probe --device /dev/video0
+./vision_app --mode live --device /dev/video0 --width 160 --height 120 --fps 120
+./vision_app --mode calibrate --config config/profile.conf
+./vision_app --mode deploy --config config/profile.conf
 ```
 
-Probe benchmark:
+## Calibration controls
 
-```bash
-./vision_app --mode probe --probe-task bench --device /dev/video0 --duration 5
-```
+- `enter` / `space`: lock current AprilTag warp
+- `u`: unlock
+- `p`: save profile + rois + warp + report
+- `y`: save warp only
+- `o`: save profile only
+- `q` / `esc`: quit
+- `[` `]`: move step down / up
+- `,` `.`: size step down / up
 
-Calibrate stacked dynamic mode:
+### fixed_rect
+- `1`: edit `red_roi`
+- `2`: edit `image_roi`
+- `w a s d`: move
+- `i k`: height - / +
+- `j l`: width - / +
 
-```bash
-./vision_app --config ../configs/vision_app.conf --mode calibrate --roi-mode dynamic_red_stacked --red-show-mask-window 1
-```
+### dynamic_red_stacked
+- `1`: edit `upper_band`
+- `2`: edit `lower_band`
+- `3`: edit derived image ROI config
+- `w s`: move band or ROI bottom offset
+- `i k`: height - / +
+- `j l`: width - / +
 
-Deploy stacked dynamic mode:
+## Known limits of this first-pass clean version
 
-```bash
-./vision_app --config ../configs/vision_app.conf --mode deploy --roi-mode dynamic_red_stacked
-```
-
-
-## Folder layout
-
-```
-vision_app/
-├── CMakeLists.txt
-├── configs/
-│   └── vision_app.conf
-├── docs/
-├── include/vision_app/
-│   ├── camera.hpp
-│   ├── calibrate.hpp
-│   ├── classifier_common.hpp
-│   ├── deploy.hpp
-│   ├── model.hpp
-│   ├── ncnn_classifier.hpp
-│   ├── onnx_classifier.hpp
-│   ├── stats.hpp
-│   └── text_console.hpp
-├── src/
-│   ├── main.cpp
-│   ├── model.cpp
-│   └── roi_helper.cpp
-└── cmake/
-```
+- The dynamic mode is intentionally conservative. It is structurally clean and inspectable, but the derived ROI anchoring rule is still a first-pass assumption.
+- The fixed-rect path is the more mature path.
+- The project was reorganized for clarity and future iteration; more tuning keys and config fields can be added without re-entangling the core loops.
