@@ -63,6 +63,40 @@ inline bool probe_camera(const std::string& device, CameraProbeResult& out, std:
     out = {};
     out.device = device;
 
+    bool is_v4l2 = (device.find("/dev/video") == 0);
+    if (!is_v4l2) {
+        std::cout << "Device is not /dev/video*, falling back to OpenCV probe...\n";
+        cv::VideoCapture cap;
+        bool is_number = !device.empty() && std::all_of(device.begin(), device.end(), ::isdigit);
+        if (is_number) cap.open(std::stoi(device), cv::CAP_ANY);
+        else cap.open(device, cv::CAP_ANY);
+        
+        if (!cap.isOpened()) {
+            err = "cannot open non-v4l2 camera: " + device;
+            return false;
+        }
+        
+        CameraMode mode;
+        int fcc = static_cast<int>(cap.get(cv::CAP_PROP_FOURCC));
+        char fcc_str[5] = {0};
+        for (int i = 0; i < 4; ++i) {
+            fcc_str[i] = static_cast<char>((fcc >> (i * 8)) & 0xFF);
+            if (!isprint(fcc_str[i])) fcc_str[i] = ' ';
+        }
+        if (std::string(fcc_str) == "    ") mode.pixfmt = "UKNW";
+        else mode.pixfmt = fcc_str;
+        mode.width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+        mode.height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+        double fps = cap.get(cv::CAP_PROP_FPS);
+        if (fps > 0) mode.fps.push_back(fps);
+        else mode.fps.push_back(0.0);
+        
+        out.card = "OpenCV Probe Fallback";
+        out.bus = "N/A";
+        out.modes.push_back(mode);
+        return true;
+    }
+
     std::string all;
     run_command("v4l2-ctl -d '" + device + "' --all 2>/dev/null", all);
     {
@@ -156,7 +190,19 @@ inline bool open_capture(cv::VideoCapture& cap,
                          int camera_soft_max,
                          std::string& err) {
     clamp_camera_size(width, height, camera_soft_max);
-    cap.open(device, cv::CAP_V4L2);
+    
+    bool is_number = !device.empty() && std::all_of(device.begin(), device.end(), ::isdigit);
+    int backend = cv::CAP_ANY;
+    if (device.find("/dev/video") == 0) {
+        backend = cv::CAP_V4L2;
+    }
+    
+    if (is_number) {
+        cap.open(std::stoi(device), backend);
+    } else {
+        cap.open(device, backend);
+    }
+    
     if (!cap.isOpened()) { err = "cannot open camera: " + device; return false; }
     if (!fourcc.empty()) cap.set(cv::CAP_PROP_FOURCC, fourcc_from_string(fourcc));
     cap.set(cv::CAP_PROP_FRAME_WIDTH, width);
