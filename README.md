@@ -7,7 +7,7 @@ A cleaned first-pass C++ vision app for:
 - `calibrate`: AprilTag lock + warp preview + trigger tuning
 - `deploy`: load saved warp/profile and run trigger + classifier
 
-This package keeps the current working atoms, but reorganizes the project around a cleaner profile/artifact split and a separate status window so numeric/debug text does not fight the preview bounds.
+This package keeps the current working atoms, but reorganizes the project around a cleaner profile/artifact split and a separate status window so numeric/debug text does not fight the preview bounds. It also supports both local V4L2 cameras and RTSP/HTTP streams through a split camera implementation.
 
 ## Project layout
 
@@ -25,6 +25,7 @@ vision_app/
     ├── app_config.cpp
     ├── app_types.hpp
     ├── camera.hpp
+    ├── camera.cpp
     ├── calibrate.hpp
     ├── classifier_common.hpp
     ├── deploy_runtime.hpp

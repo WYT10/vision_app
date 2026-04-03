@@ -75,9 +75,9 @@ int main(int argc, char** argv) {
             else if (a == "--latest-only") opt.latest_only = parse_bool(need(i, argc, argv, "--latest-only"));
             else if (a == "--drain-grabs") opt.drain_grabs = std::stoi(need(i, argc, argv, "--drain-grabs"));
             else if (a == "--ui") opt.ui = parse_bool(need(i, argc, argv, "--ui"));
-            else if (a == "--mobile-webcam") opt.mobile_webcam = parse_bool(need(i, argc, argv, "--mobile-webcam"));
             else if (a == "--draw-overlay") opt.draw_overlay = parse_bool(need(i, argc, argv, "--draw-overlay"));
             else if (a == "--duration") opt.duration = std::stoi(need(i, argc, argv, "--duration"));
+            else if (a == "--camera-soft-max") opt.camera_soft_max = std::stoi(need(i, argc, argv, "--camera-soft-max"));
             else if (a == "--camera-preview-max") opt.camera_preview_max = std::stoi(need(i, argc, argv, "--camera-preview-max"));
             else if (a == "--warp-preview-max") opt.warp_preview_max = std::stoi(need(i, argc, argv, "--warp-preview-max"));
             else if (a == "--status-width") opt.status_width = std::stoi(need(i, argc, argv, "--status-width"));
@@ -135,13 +135,7 @@ int main(int argc, char** argv) {
             else throw std::runtime_error("unknown argument: " + a);
         }
 
-        if (opt.mobile_webcam) {
-            std::cout << "[INFO] Mobile webcam mode enabled: throttling to ~10fps, setting arbitrary backend\n";
-            opt.drain_grabs = 2; // skip 2 frames per read, 30fps -> 10fps
-            opt.fourcc = ""; // Let backend decide safely
-            opt.buffer_size = 1;
-            opt.latest_only = true;
-        }
+        resolve_profile_paths(config_path, opt);
 
         std::string err;
         if (opt.mode == "probe") return run_probe(opt, err) ? 0 : (std::cerr << "Probe failed: " << err << "\n", 1);

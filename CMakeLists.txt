@@ -16,6 +16,7 @@ find_package(OpenMP)
 add_executable(vision_app
     src/main.cpp
     src/app_config.cpp
+    src/camera.cpp
     src/status_ui.cpp
     src/trigger.cpp
     src/model.cpp

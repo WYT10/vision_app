@@ -22,8 +22,6 @@ struct AppOptions {
     bool latest_only = true;
     int drain_grabs = 1;
 
-    bool mobile_webcam = false;
-
     bool ui = true;
     int duration = 10;
     bool draw_overlay = true;

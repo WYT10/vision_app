@@ -49,18 +49,64 @@ bool parse_band_csv(const std::string& s, BandRatio& b) {
 }
 
 std::string roi_csv(const RoiRatio& r) {
-    std::ostringstream oss; oss << r.x << ',' << r.y << ',' << r.w << ',' << r.h; return oss.str();
+    std::ostringstream oss;
+    oss << r.x << ',' << r.y << ',' << r.w << ',' << r.h;
+    return oss.str();
 }
+
 std::string band_csv(const BandRatio& b) {
-    std::ostringstream oss; oss << b.y << ',' << b.h; return oss.str();
+    std::ostringstream oss;
+    oss << b.y << ',' << b.h;
+    return oss.str();
+}
+
+bool is_probably_stream_path(const std::string& s) {
+    return s.rfind("rtsp://", 0) == 0 || s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0;
+}
+
+std::filesystem::path materialize_config_path(const std::string& raw) {
+    if (raw.empty()) return {};
+    std::filesystem::path p(raw);
+    if (p.is_absolute()) return p;
+    if (std::filesystem::exists(p)) return std::filesystem::absolute(p);
+
+    const auto cwd = std::filesystem::current_path();
+    if (cwd.filename() == "build") {
+        const auto candidate = cwd.parent_path() / p;
+        if (std::filesystem::exists(candidate)) return candidate;
+    }
+    return std::filesystem::absolute(p);
+}
+
+std::filesystem::path choose_project_root_from_config(const std::filesystem::path& config_path) {
+    if (config_path.empty()) return std::filesystem::current_path();
+    std::filesystem::path abs_config = config_path;
+    if (!abs_config.is_absolute()) abs_config = std::filesystem::absolute(abs_config);
+    const std::filesystem::path config_dir = abs_config.parent_path();
+    if (config_dir.filename() == "config" && config_dir.has_parent_path()) return config_dir.parent_path();
+    return config_dir.empty() ? std::filesystem::current_path() : config_dir;
+}
+
+std::string resolve_file_like_path(const std::string& raw, const std::filesystem::path& project_root) {
+    if (raw.empty() || is_probably_stream_path(raw)) return raw;
+    std::filesystem::path p(raw);
+    if (p.is_absolute()) return p.lexically_normal().string();
+    return (project_root / p).lexically_normal().string();
+}
+
+void ensure_parent_dir(const std::filesystem::path& p) {
+    const auto parent = p.parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
 }
 
 } // namespace
 
 bool load_profile_config(const std::string& path, AppOptions& o, std::string& err) {
     err.clear();
-    std::ifstream in(path);
+    const std::filesystem::path config_fs_path = materialize_config_path(path);
+    std::ifstream in(config_fs_path);
     if (!in.is_open()) return true;
+
     std::string line;
     while (std::getline(in, line)) {
         line = trim(line);
@@ -145,7 +191,7 @@ bool load_profile_config(const std::string& path, AppOptions& o, std::string& er
 
 bool save_profile_config(const std::string& path, const AppOptions& o, std::string& err) {
     err.clear();
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    ensure_parent_dir(path);
     std::ofstream out(path);
     if (!out.is_open()) {
         err = "cannot write profile: " + path;
@@ -226,6 +272,24 @@ bool save_profile_config(const std::string& path, const AppOptions& o, std::stri
     return true;
 }
 
+void resolve_profile_paths(const std::string& config_path, AppOptions& opt) {
+    const std::filesystem::path concrete_config = materialize_config_path(config_path.empty() ? opt.profile_path : config_path);
+    const std::filesystem::path project_root = choose_project_root_from_config(concrete_config);
+
+    opt.profile_path = concrete_config.lexically_normal().string();
+    opt.save_warp = resolve_file_like_path(opt.save_warp, project_root);
+    opt.load_warp = resolve_file_like_path(opt.load_warp, project_root);
+    opt.save_rois = resolve_file_like_path(opt.save_rois, project_root);
+    opt.load_rois = resolve_file_like_path(opt.load_rois, project_root);
+    opt.save_report = resolve_file_like_path(opt.save_report, project_root);
+    opt.save_image_roi_dir = resolve_file_like_path(opt.save_image_roi_dir, project_root);
+    opt.save_red_roi_dir = resolve_file_like_path(opt.save_red_roi_dir, project_root);
+    opt.model_cfg.onnx_path = resolve_file_like_path(opt.model_cfg.onnx_path, project_root);
+    opt.model_cfg.ncnn_param_path = resolve_file_like_path(opt.model_cfg.ncnn_param_path, project_root);
+    opt.model_cfg.ncnn_bin_path = resolve_file_like_path(opt.model_cfg.ncnn_bin_path, project_root);
+    opt.model_cfg.labels_path = resolve_file_like_path(opt.model_cfg.labels_path, project_root);
+}
+
 void print_help() {
     std::cout << R"TXT(
 vision_app
@@ -248,10 +312,32 @@ Modes:
 
 Core args:
   --config PATH
-  --device /dev/video0
+  --device /dev/video0 | rtsp://... | http://...
   --width 160 --height 120 --fourcc MJPG --fps 120
+  --buffer-size 1
+  --latest-only 1
+  --drain-grabs 1
   --ui 1
+  --draw-overlay 1
   --duration 10
+  --camera-soft-max 1000
+  --camera-preview-max 800
+  --warp-preview-max 900
+  --status-width 720
+
+Tag / warp args:
+  --warp-width 384 --warp-height 384
+  --target-tag-px 128
+  --tag-family auto|16|25|36
+  --target-id 0
+  --require-target-id 1
+  --manual-lock-only 1
+  --lock-frames 4
+  --save-warp PATH
+  --load-warp PATH
+  --save-rois PATH
+  --load-rois PATH
+  --save-report PATH
 
 Trigger args:
   --trigger-mode fixed_rect|dynamic_red_stacked
@@ -266,15 +352,53 @@ Trigger args:
   --min-red-width-ratio V
   --min-red-fill-ratio V
 
-Status/UI:
+Red threshold args:
+  --red-h1-low N
+  --red-h1-high N
+  --red-h2-low N
+  --red-h2-high N
+  --red-s-min N
+  --red-v-min N
+
+Model args:
+  --model-enable 1
+  --model-backend onnx|ncnn
+  --model-onnx-path PATH
+  --model-ncnn-param-path PATH
+  --model-ncnn-bin-path PATH
+  --model-labels-path PATH
+  --model-input-width 128
+  --model-input-height 128
+  --model-preprocess crop|stretch|letterbox
+  --model-threads 4
+  --model-stride 1
+  --model-topk 5
+  --model-max-hz 5.0
+
+Runtime save / partial pipeline:
+  --run-red 1
+  --run-image-roi 1
+  --run-model 1
+  --save-image-roi-dir PATH
+  --save-red-roi-dir PATH
+  --save-every-n 10
+
+Status / UI:
   --text-sink overlay|status_window|terminal|split
   --show-status-window 1
 
+Notes:
+  - For probe, /dev/video* uses v4l2-ctl enumeration.
+  - RTSP / HTTP sources fall back to OpenCV probe and show observed stream properties.
+  - Relative save/load/model paths from the profile are resolved from project root when the profile is in ./config.
+  - In calibrate: o=save profile only, y=save warp only, p=save profile+rois+warp+report.
+
 Examples:
   ./vision_app --mode probe --device /dev/video0
+  ./vision_app --mode probe --device rtsp://192.168.0.233:5500/camera
   ./vision_app --mode live --device /dev/video0 --width 160 --height 120 --fps 120
-  ./vision_app --mode calibrate --config config/profile.conf
-  ./vision_app --mode deploy --config config/profile.conf
+  ./vision_app --mode calibrate --config /home/pi/Desktop/vision_app/config/profile.conf
+  ./vision_app --mode deploy --config /home/pi/Desktop/vision_app/config/profile.conf
 )TXT";
 }
 
