@@ -1,8 +1,9 @@
-
 #include "trigger.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <numeric>
 #include <sstream>
 
 namespace vision_app {
@@ -29,6 +30,7 @@ cv::Mat build_red_mask(const cv::Mat& bgr, const cv::Mat& valid_mask, const RedT
 }
 
 cv::Rect clamp_rect(const cv::Rect& r, const cv::Size& sz) {
+    if (sz.width <= 0 || sz.height <= 0) return {};
     const int x0 = std::clamp(r.x, 0, std::max(0, sz.width - 1));
     const int y0 = std::clamp(r.y, 0, std::max(0, sz.height - 1));
     const int x1 = std::clamp(r.x + r.width, x0 + 1, sz.width);
@@ -48,6 +50,7 @@ struct BandMetrics {
     int x0 = -1;
     int x1 = -1;
     int center_x = -1;
+    std::vector<float> col_support;
 };
 
 BandMetrics analyze_band(const cv::Mat& red_mask, const cv::Mat& valid_mask) {
@@ -56,13 +59,15 @@ BandMetrics analyze_band(const cv::Mat& red_mask, const cv::Mat& valid_mask) {
     const int red_px = cv::countNonZero(red_mask);
     m.fill_ratio = static_cast<double>(red_px) / static_cast<double>(valid_px);
 
+    m.col_support.assign(red_mask.cols, 0.0f);
     std::vector<int> active_cols;
     active_cols.reserve(red_mask.cols);
     for (int x = 0; x < red_mask.cols; ++x) {
         const int valid_col = std::max(1, cv::countNonZero(valid_mask.col(x)));
         const int red_col = cv::countNonZero(red_mask.col(x));
-        const double col_fill = static_cast<double>(red_col) / static_cast<double>(valid_col);
-        if (col_fill >= 0.10) active_cols.push_back(x);
+        const float col_fill = static_cast<float>(red_col) / static_cast<float>(valid_col);
+        m.col_support[x] = col_fill;
+        if (col_fill >= 0.10f) active_cols.push_back(x);
     }
     if (!active_cols.empty()) {
         m.x0 = active_cols.front();
@@ -71,6 +76,139 @@ BandMetrics analyze_band(const cv::Mat& red_mask, const cv::Mat& valid_mask) {
         m.width_ratio = static_cast<double>(m.x1 - m.x0 + 1) / static_cast<double>(std::max(1, red_mask.cols));
     }
     return m;
+}
+
+std::vector<float> smooth_1d_box(const std::vector<float>& v, int radius) {
+    if (v.empty() || radius <= 0) return v;
+    std::vector<float> out(v.size(), 0.0f);
+    std::vector<float> prefix(v.size() + 1, 0.0f);
+    for (size_t i = 0; i < v.size(); ++i) prefix[i + 1] = prefix[i] + v[i];
+    for (int i = 0; i < static_cast<int>(v.size()); ++i) {
+        const int a = std::max(0, i - radius);
+        const int b = std::min(static_cast<int>(v.size()) - 1, i + radius);
+        out[i] = (prefix[b + 1] - prefix[a]) / static_cast<float>(b - a + 1);
+    }
+    return out;
+}
+
+struct OverlapRun {
+    bool valid = false;
+    int x0 = -1;
+    int x1 = -1;
+    int center_x = -1;
+    double width_ratio = 0.0;
+    double score_sum = 0.0;
+};
+
+OverlapRun find_best_overlap_run(const std::vector<float>& upper_support,
+                                 const std::vector<float>& lower_support,
+                                 int width,
+                                 double min_fill_ratio,
+                                 double smoothing_alpha) {
+    OverlapRun best;
+    if (upper_support.empty() || lower_support.empty() || width <= 0) return best;
+
+    std::vector<float> overlap(width, 0.0f);
+    for (int x = 0; x < width; ++x) {
+        overlap[x] = std::min(upper_support[x], lower_support[x]);
+    }
+
+    const int radius = std::clamp(static_cast<int>(std::round(smoothing_alpha * 10.0)), 1, 8);
+    const std::vector<float> smooth = smooth_1d_box(overlap, radius);
+    const float thr = static_cast<float>(std::clamp(std::max(0.06, min_fill_ratio * 0.5), 0.04, 0.35));
+
+    int run_start = -1;
+    double run_sum = 0.0;
+    for (int x = 0; x < width; ++x) {
+        if (smooth[x] >= thr) {
+            if (run_start < 0) {
+                run_start = x;
+                run_sum = 0.0;
+            }
+            run_sum += smooth[x];
+        } else if (run_start >= 0) {
+            const int x0 = run_start;
+            const int x1 = x - 1;
+            const int run_w = x1 - x0 + 1;
+            const double score = run_sum + 0.15 * static_cast<double>(run_w);
+            if (!best.valid || score > best.score_sum) {
+                best.valid = true;
+                best.x0 = x0;
+                best.x1 = x1;
+                best.center_x = (x0 + x1) / 2;
+                best.width_ratio = static_cast<double>(run_w) / static_cast<double>(width);
+                best.score_sum = score;
+            }
+            run_start = -1;
+            run_sum = 0.0;
+        }
+    }
+    if (run_start >= 0) {
+        const int x0 = run_start;
+        const int x1 = width - 1;
+        const int run_w = x1 - x0 + 1;
+        const double score = run_sum + 0.15 * static_cast<double>(run_w);
+        if (!best.valid || score > best.score_sum) {
+            best.valid = true;
+            best.x0 = x0;
+            best.x1 = x1;
+            best.center_x = (x0 + x1) / 2;
+            best.width_ratio = static_cast<double>(run_w) / static_cast<double>(width);
+            best.score_sum = score;
+        }
+    }
+    return best;
+}
+
+cv::Rect fit_red_bar_component(const cv::Mat& full_red_mask,
+                               const cv::Rect& search_rect,
+                               int preferred_cx) {
+    if (search_rect.width <= 0 || search_rect.height <= 0) return {};
+    cv::Mat roi = full_red_mask(search_rect).clone();
+    if (roi.empty()) return {};
+
+    const int close_w = std::max(3, (search_rect.width / 18) | 1);
+    const int close_h = std::max(3, (search_rect.height / 5) | 1);
+    const int open_w = 3;
+    const int open_h = 3;
+    cv::morphologyEx(roi, roi, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(open_w, open_h)));
+    cv::morphologyEx(roi, roi, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(close_w, close_h)));
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(roi, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    double best_score = -std::numeric_limits<double>::infinity();
+    cv::Rect best;
+    for (const auto& c : contours) {
+        const double area = cv::contourArea(c);
+        if (area < 8.0) continue;
+        cv::Rect b = cv::boundingRect(c);
+        if (b.width < 3 || b.height < 2) continue;
+        const double aspect = static_cast<double>(b.width) / static_cast<double>(std::max(1, b.height));
+        const double fill = area / static_cast<double>(std::max(1, b.area()));
+        const int cx = b.x + b.width / 2;
+        const double center_penalty = 0.05 * std::abs(cx - preferred_cx);
+        const double aspect_bonus = std::min(4.0, aspect);
+        const double score = area + 1.5 * b.width + 8.0 * fill + 6.0 * aspect_bonus - center_penalty;
+        if (score > best_score) {
+            best_score = score;
+            best = b;
+        }
+    }
+
+    if (best.area() <= 0) return {};
+    return cv::Rect(best.x + search_rect.x, best.y + search_rect.y, best.width, best.height);
+}
+
+int find_topmost_red_y_in_rect(const cv::Mat& full_red_mask, const cv::Rect& rect) {
+    if (rect.width <= 0 || rect.height <= 0) return -1;
+    const cv::Mat roi = full_red_mask(rect);
+    for (int y = 0; y < roi.rows; ++y) {
+        if (cv::countNonZero(roi.row(y)) > 0) return rect.y + y;
+    }
+    return -1;
 }
 
 } // namespace
@@ -130,16 +268,15 @@ bool extract_runtime_rois_dynamic(const cv::Mat& warped,
         return false;
     }
 
+    const cv::Mat full_red = build_red_mask(warped, valid_mask, red_cfg);
+
     dbg.upper_band_px = band_to_rect(dyn_cfg.upper_band, warped.size());
     dbg.lower_band_px = band_to_rect(dyn_cfg.lower_band, warped.size());
 
-    const cv::Mat upper_bgr = warped(dbg.upper_band_px).clone();
+    const cv::Mat upper_red = full_red(dbg.upper_band_px).clone();
     const cv::Mat upper_valid = valid_mask(dbg.upper_band_px).clone();
-    const cv::Mat lower_bgr = warped(dbg.lower_band_px).clone();
+    const cv::Mat lower_red = full_red(dbg.lower_band_px).clone();
     const cv::Mat lower_valid = valid_mask(dbg.lower_band_px).clone();
-
-    const cv::Mat upper_red = build_red_mask(upper_bgr, upper_valid, red_cfg);
-    const cv::Mat lower_red = build_red_mask(lower_bgr, lower_valid, red_cfg);
 
     const BandMetrics upper = analyze_band(upper_red, upper_valid);
     const BandMetrics lower = analyze_band(lower_red, lower_valid);
@@ -152,24 +289,57 @@ bool extract_runtime_rois_dynamic(const cv::Mat& warped,
     dbg.lower_x0 = lower.x0;
     dbg.lower_x1 = lower.x1;
 
+    const OverlapRun overlap = find_best_overlap_run(upper.col_support,
+                                                     lower.col_support,
+                                                     warped.cols,
+                                                     dyn_cfg.min_red_fill_ratio,
+                                                     dyn_cfg.x_smoothing_alpha);
+    dbg.overlap_x0 = overlap.x0;
+    dbg.overlap_x1 = overlap.x1;
+    dbg.overlap_width_ratio = overlap.width_ratio;
+    dbg.center_x_px = overlap.valid ? overlap.center_x
+                                    : (upper.center_x >= 0 && lower.center_x >= 0 ? (upper.center_x + lower.center_x) / 2
+                                                                                   : std::max(upper.center_x, lower.center_x));
+
     const bool upper_ok = upper.width_ratio >= dyn_cfg.min_red_width_ratio && upper.fill_ratio >= dyn_cfg.min_red_fill_ratio;
     const bool lower_ok = lower.width_ratio >= dyn_cfg.min_red_width_ratio && lower.fill_ratio >= dyn_cfg.min_red_fill_ratio;
-    dbg.triggered = upper_ok && lower_ok;
+    const bool overlap_ok = overlap.valid && overlap.width_ratio >= dyn_cfg.min_red_width_ratio;
+    dbg.triggered = upper_ok && lower_ok && overlap_ok;
 
-    if (upper.center_x >= 0 && lower.center_x >= 0) dbg.center_x_px = (upper.center_x + lower.center_x) / 2;
-    else dbg.center_x_px = std::max(upper.center_x, lower.center_x);
+    const int run_x0 = overlap.valid ? overlap.x0 : std::max(0, dbg.center_x_px - std::max(4, warped.cols / 12));
+    const int run_x1 = overlap.valid ? overlap.x1 : std::min(warped.cols - 1, dbg.center_x_px + std::max(4, warped.cols / 12));
+    const int expand_x = std::max(4, static_cast<int>(std::round(0.08 * warped.cols)));
+    const int search_x0 = std::max(0, run_x0 - expand_x);
+    const int search_x1 = std::min(warped.cols - 1, run_x1 + expand_x);
+    const int band_margin = std::max(2, static_cast<int>(std::round(0.5 * std::max(dbg.upper_band_px.height, dbg.lower_band_px.height))));
+    const int search_y0 = std::max(0, std::min(dbg.upper_band_px.y, dbg.lower_band_px.y) - band_margin);
+    const int search_y1 = std::min(warped.rows - 1,
+                                   std::max(dbg.upper_band_px.y + dbg.upper_band_px.height,
+                                            dbg.lower_band_px.y + dbg.lower_band_px.height) + band_margin);
+    const cv::Rect search_rect = clamp_rect(cv::Rect(search_x0, search_y0, search_x1 - search_x0 + 1, search_y1 - search_y0 + 1), warped.size());
 
-    // First-pass anchoring rule: place image ROI above the upper red band.
+    dbg.fitted_bar_px = fit_red_bar_component(full_red, search_rect, dbg.center_x_px >= 0 ? dbg.center_x_px : warped.cols / 2);
+    if (dbg.fitted_bar_px.area() > 0) {
+        dbg.center_x_px = dbg.fitted_bar_px.x + dbg.fitted_bar_px.width / 2;
+        dbg.bar_top_y_px = dbg.fitted_bar_px.y;
+        dbg.bar_bottom_y_px = dbg.fitted_bar_px.y + dbg.fitted_bar_px.height;
+    } else {
+        dbg.bar_top_y_px = find_topmost_red_y_in_rect(full_red, search_rect);
+        if (dbg.bar_top_y_px >= 0) dbg.bar_bottom_y_px = search_rect.y + search_rect.height;
+    }
+
     const int roi_w = std::max(1, static_cast<int>(std::round(dyn_cfg.image_roi.width * warped.cols)));
     const int roi_h = std::max(1, static_cast<int>(std::round(dyn_cfg.image_roi.height * warped.rows)));
     const int cx = (dbg.center_x_px >= 0) ? dbg.center_x_px : warped.cols / 2;
-    const int bottom = dbg.upper_band_px.y - static_cast<int>(std::round(dyn_cfg.image_roi.bottom_offset * warped.rows));
+    const int anchor_top = (dbg.bar_top_y_px >= 0) ? dbg.bar_top_y_px : dbg.upper_band_px.y;
+    const int bottom = anchor_top - static_cast<int>(std::round(dyn_cfg.image_roi.bottom_offset * warped.rows));
     const int x0 = cx - roi_w / 2;
     const int y0 = bottom - roi_h;
     dbg.derived_image_roi_px = clamp_rect(cv::Rect(x0, y0, roi_w, roi_h), warped.size());
 
-    out.red_bgr = warped(dbg.upper_band_px | dbg.lower_band_px).clone();
-    out.red_mask = valid_mask(dbg.upper_band_px | dbg.lower_band_px).clone();
+    const cv::Rect red_union = dbg.upper_band_px | dbg.lower_band_px;
+    out.red_bgr = warped(red_union).clone();
+    out.red_mask = valid_mask(red_union).clone();
     out.image_bgr = warped(dbg.derived_image_roi_px).clone();
     out.image_mask = valid_mask(dbg.derived_image_roi_px).clone();
     out.red_valid_pixels = cv::countNonZero(out.red_mask);
@@ -183,7 +353,9 @@ bool extract_runtime_rois_dynamic(const cv::Mat& warped,
     oss << "dynamic trig=" << (dbg.triggered ? "1" : "0")
         << " upper(fill=" << dbg.upper_fill_ratio << ",w=" << dbg.upper_width_ratio << ")"
         << " lower(fill=" << dbg.lower_fill_ratio << ",w=" << dbg.lower_width_ratio << ")"
-        << " cx=" << dbg.center_x_px;
+        << " overlap_w=" << dbg.overlap_width_ratio
+        << " cx=" << dbg.center_x_px
+        << " top=" << dbg.bar_top_y_px;
     dbg.summary = oss.str();
     err.clear();
     return true;
@@ -214,8 +386,16 @@ void draw_trigger_overlay_dynamic(cv::Mat& img,
     cv::putText(img, "lower_band", dbg.lower_band_px.tl() + cv::Point(4, 18), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,140,255), 2);
     cv::rectangle(img, dbg.derived_image_roi_px, highlight_image ? cv::Scalar(255,0,0) : cv::Scalar(180,40,40), 2);
     cv::putText(img, "image_roi", dbg.derived_image_roi_px.tl() + cv::Point(4, 18), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255,0,0), 2);
+    if (dbg.overlap_x0 >= 0 && dbg.overlap_x1 >= dbg.overlap_x0) {
+        cv::line(img, cv::Point(dbg.overlap_x0, 0), cv::Point(dbg.overlap_x0, img.rows - 1), cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+        cv::line(img, cv::Point(dbg.overlap_x1, 0), cv::Point(dbg.overlap_x1, img.rows - 1), cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+    }
     if (dbg.center_x_px >= 0) {
         cv::line(img, cv::Point(dbg.center_x_px, 0), cv::Point(dbg.center_x_px, img.rows - 1), cv::Scalar(0,255,255), 1, cv::LINE_AA);
+    }
+    if (dbg.fitted_bar_px.area() > 0) {
+        cv::rectangle(img, dbg.fitted_bar_px, cv::Scalar(0, 255, 255), 2);
+        cv::putText(img, "red_bar_fit", dbg.fitted_bar_px.tl() + cv::Point(4, -4), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,255,255), 1, cv::LINE_AA);
     }
     if (dbg.triggered) cv::putText(img, "TRIGGER", {12, img.rows - 18}, cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0,255,0), 2);
 }

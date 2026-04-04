@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <string>
@@ -31,7 +30,7 @@ struct FixedRectTriggerConfig {
 };
 
 struct DynamicImageRoiConfig {
-    double bottom_offset = 0.05; // normalized distance from upper band top to image ROI bottom
+    double bottom_offset = 0.05; // normalized distance from fitted bar top to image ROI bottom
     double width = 0.32;
     double height = 0.32;
 };
@@ -52,17 +51,23 @@ struct TriggerDebugInfo {
     cv::Rect upper_band_px;
     cv::Rect lower_band_px;
     cv::Rect derived_image_roi_px;
+    cv::Rect fitted_bar_px;
 
     double upper_fill_ratio = 0.0;
     double lower_fill_ratio = 0.0;
     double upper_width_ratio = 0.0;
     double lower_width_ratio = 0.0;
+    double overlap_width_ratio = 0.0;
 
     int upper_x0 = -1;
     int upper_x1 = -1;
     int lower_x0 = -1;
     int lower_x1 = -1;
+    int overlap_x0 = -1;
+    int overlap_x1 = -1;
     int center_x_px = -1;
+    int bar_top_y_px = -1;
+    int bar_bottom_y_px = -1;
 
     std::string summary;
 };

@@ -85,7 +85,7 @@ inline std::vector<std::string> build_calibrate_status_lines(const AppOptions& o
         d << "upper(fill=" << dbg.upper_fill_ratio << ", w=" << dbg.upper_width_ratio << ")  lower(fill=" << dbg.lower_fill_ratio << ", w=" << dbg.lower_width_ratio << ")";
         lines.push_back(d.str());
         std::ostringstream e;
-        e << "cx=" << dbg.center_x_px << "  triggered=" << (dbg.triggered ? 1 : 0);
+        e << "overlap_w=" << dbg.overlap_width_ratio << "  cx=" << dbg.center_x_px << "  top=" << dbg.bar_top_y_px << "  triggered=" << (dbg.triggered ? 1 : 0);
         lines.push_back(e.str());
     }
     std::ostringstream st;
@@ -110,7 +110,7 @@ inline std::vector<std::string> build_deploy_status_lines(const AppOptions& opt,
     } else {
         std::ostringstream a, b;
         a << "upper(fill=" << dbg.upper_fill_ratio << ", w=" << dbg.upper_width_ratio << ")  lower(fill=" << dbg.lower_fill_ratio << ", w=" << dbg.lower_width_ratio << ")";
-        b << "cx=" << dbg.center_x_px << "  triggered=" << (dbg.triggered ? 1 : 0);
+        b << "overlap_w=" << dbg.overlap_width_ratio << "  cx=" << dbg.center_x_px << "  top=" << dbg.bar_top_y_px << "  triggered=" << (dbg.triggered ? 1 : 0);
         lines.push_back(a.str());
         lines.push_back(b.str());
     }
