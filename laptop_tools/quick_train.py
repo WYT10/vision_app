@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='Convenience wrapper around the full multi-size retrain pipeline.')
+    ap = argparse.ArgumentParser(description='Convenience wrapper around the multi-size retrain pipeline.')
     ap.add_argument('--src-dir', required=True, help='Synthetic source img_dataset root')
     ap.add_argument('--run-dir', required=True, help='Controller session run dir')
     ap.add_argument('--workspace-root', default='', help='Optional. Default: sibling workspaces/<session> next to run-dir')

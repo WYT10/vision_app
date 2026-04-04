@@ -1,10 +1,9 @@
-
 #pragma once
+
 #include <string>
 #include <vector>
 
 #include <opencv2/core.hpp>
-#include "calibrate.hpp"
 
 namespace vision_app {
 
@@ -16,14 +15,13 @@ struct ModelHit {
 
 struct ModelConfig {
     bool enable = false;
-    std::string backend = "off"; // off | onnx | ncnn
-    std::string onnx_path;
+    std::string backend = "ncnn";  // ncnn | off
     std::string ncnn_param_path;
     std::string ncnn_bin_path;
     std::string labels_path;
     int input_width = 128;
     int input_height = 128;
-    std::string preprocess = "crop"; // crop | stretch | letterbox
+    std::string preprocess = "crop";  // crop | stretch | letterbox
     int threads = 4;
     int stride = 1;
     int topk = 5;

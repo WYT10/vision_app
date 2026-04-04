@@ -115,7 +115,6 @@ int main(int argc, char** argv) {
             else if (a == "--red-v-min") opt.red_cfg.v_min = std::stoi(need(i, argc, argv, "--red-v-min"));
             else if (a == "--model-enable") opt.model_cfg.enable = parse_bool(need(i, argc, argv, "--model-enable"));
             else if (a == "--model-backend") opt.model_cfg.backend = need(i, argc, argv, "--model-backend");
-            else if (a == "--model-onnx-path") opt.model_cfg.onnx_path = need(i, argc, argv, "--model-onnx-path");
             else if (a == "--model-ncnn-param-path") opt.model_cfg.ncnn_param_path = need(i, argc, argv, "--model-ncnn-param-path");
             else if (a == "--model-ncnn-bin-path") opt.model_cfg.ncnn_bin_path = need(i, argc, argv, "--model-ncnn-bin-path");
             else if (a == "--model-labels-path") opt.model_cfg.labels_path = need(i, argc, argv, "--model-labels-path");

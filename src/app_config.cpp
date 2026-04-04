@@ -168,7 +168,6 @@ bool load_profile_config(const std::string& path, AppOptions& o, std::string& er
         else if (k == "red_v_min") o.red_cfg.v_min = std::stoi(v);
         else if (k == "model_enable") o.model_cfg.enable = parse_bool(v);
         else if (k == "model_backend") o.model_cfg.backend = v;
-        else if (k == "model_onnx_path") o.model_cfg.onnx_path = v;
         else if (k == "model_ncnn_param_path") o.model_cfg.ncnn_param_path = v;
         else if (k == "model_ncnn_bin_path") o.model_cfg.ncnn_bin_path = v;
         else if (k == "model_labels_path") o.model_cfg.labels_path = v;
@@ -262,7 +261,6 @@ bool save_profile_config(const std::string& path, const AppOptions& o, std::stri
         << "red_v_min=" << o.red_cfg.v_min << "\n"
         << "model_enable=" << bool_str(o.model_cfg.enable) << "\n"
         << "model_backend=" << o.model_cfg.backend << "\n"
-        << "model_onnx_path=" << o.model_cfg.onnx_path << "\n"
         << "model_ncnn_param_path=" << o.model_cfg.ncnn_param_path << "\n"
         << "model_ncnn_bin_path=" << o.model_cfg.ncnn_bin_path << "\n"
         << "model_labels_path=" << o.model_cfg.labels_path << "\n"
@@ -305,7 +303,6 @@ void resolve_profile_paths(const std::string& config_path, AppOptions& opt) {
     opt.save_image_roi_dir = resolve_file_like_path(opt.save_image_roi_dir, project_root);
     opt.save_red_roi_dir = resolve_file_like_path(opt.save_red_roi_dir, project_root);
     opt.automation_collect_dir = resolve_file_like_path(opt.automation_collect_dir, project_root);
-    opt.model_cfg.onnx_path = resolve_file_like_path(opt.model_cfg.onnx_path, project_root);
     opt.model_cfg.ncnn_param_path = resolve_file_like_path(opt.model_cfg.ncnn_param_path, project_root);
     opt.model_cfg.ncnn_bin_path = resolve_file_like_path(opt.model_cfg.ncnn_bin_path, project_root);
     opt.model_cfg.labels_path = resolve_file_like_path(opt.model_cfg.labels_path, project_root);
@@ -383,8 +380,7 @@ Red threshold args:
 
 Model args:
   --model-enable 1
-  --model-backend onnx|ncnn
-  --model-onnx-path PATH
+  --model-backend ncnn
   --model-ncnn-param-path PATH
   --model-ncnn-bin-path PATH
   --model-labels-path PATH

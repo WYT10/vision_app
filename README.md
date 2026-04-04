@@ -1,13 +1,25 @@
-
 # vision_app
 
-A cleaned first-pass C++ vision app for:
-- `probe`: camera mode discovery via `v4l2-ctl`
-- `live`: raw preview or headless FPS test
-- `calibrate`: AprilTag lock + warp preview + trigger tuning
-- `deploy`: load saved warp/profile and run trigger + classifier
+A cleaned vision stack with a **Pi NCNN-only runtime** and a **laptop-side Python training/export pipeline**.
 
-This package keeps the current working atoms, but reorganizes the project around a cleaner profile/artifact split and a separate status window so numeric/debug text does not fight the preview bounds. It also supports both local V4L2 cameras and RTSP/HTTP streams through a split camera implementation.
+## What runs where
+
+### Pi runtime (C++)
+- `probe`: camera test / capability check
+- `live`: raw preview or headless FPS test
+- `calibrate`: AprilTag lock + warp save + ROI tuning
+- `deploy`: load saved profile/warp and run trigger + NCNN classifier
+- optional automation client inside `deploy`
+
+### Laptop tools (Python)
+- `controller_server.py`: truth controller + iPad display + result collection
+- `prepare_cls_dataset.py`: synthetic dataset generation
+- `merge_hard_examples.py`: merge collected camera ROI samples into the train split
+- `eval_export_cls.py`: train from `.pt`, then export **ONNX + NCNN**
+- `run_retrain_pipeline.py`: one-shot synthetic + merge + multi-size train/export
+
+The Pi build and runtime do **not** require ONNX Runtime.
+The laptop training/export pipeline still supports `.pt -> onnx -> ncnn`.
 
 ## Project layout
 
@@ -15,36 +27,36 @@ This package keeps the current working atoms, but reorganizes the project around
 vision_app/
 ├── CMakeLists.txt
 ├── README.md
-├── cmake/
-│   └── FindONNXRuntime.cmake
 ├── config/
+│   ├── profile.conf
 │   └── profile.example.conf
-├── report/
+├── laptop_tools/
+│   ├── controller_server.py
+│   └── quick_train.py
+├── training_tools/
+│   ├── eval_export_cls.py
+│   ├── live_tune_aug.py
+│   ├── merge_hard_examples.py
+│   ├── prepare_cls_dataset.py
+│   └── run_retrain_pipeline.py
 └── src/
-    ├── app_config.hpp
-    ├── app_config.cpp
+    ├── app_config.*
     ├── app_types.hpp
-    ├── camera.hpp
-    ├── camera.cpp
+    ├── automation.hpp
     ├── calibrate.hpp
+    ├── camera.*
     ├── classifier_common.hpp
     ├── deploy_runtime.hpp
     ├── main.cpp
-    ├── model.hpp
-    ├── model.cpp
+    ├── model.*
     ├── ncnn_classifier.hpp
-    ├── onnx_classifier.hpp
     ├── roi_helper.cpp
     ├── stats.hpp
-    ├── status_ui.hpp
-    ├── status_ui.cpp
-    ├── trigger.hpp
-    └── trigger.cpp
+    ├── status_ui.*
+    └── trigger.*
 ```
 
-## Build
-
-Use this exactly:
+## Pi build (NCNN only)
 
 ```bash
 export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH
@@ -53,265 +65,145 @@ cd ~/Desktop/vision_app
 rm -rf build
 mkdir -p build
 cd build
-cmake ..
-make -j$(nproc)
+cmake .. -Dncnn_DIR=/home/pi/ncnn/build/install/lib/cmake/ncnn
+make -j1
 ```
 
-## Runtime model
+Use `-j1` on the Pi if you want the lowest RAM and thermal load.
 
-There are two saved layers:
+## Key runtime files
 
-1. **Profile config**: `config/profile.conf`
-   - camera assumptions
-   - tag lock policy
-   - trigger mode and parameters
-   - red thresholds
-   - model settings
-   - UI/text routing behavior
+- `config/profile.conf`: editable runtime profile
+- `report/warp_package.yml.gz`: saved homography artifact
+- `report/rois.yml`: saved ROI geometry
 
-2. **Derived warp artifact**: `report/warp_package.yml.gz`
-   - homography
-   - remap maps
-   - valid mask
-   - source size / warp size
-   - locked tag family/id
+## Runtime model backend
 
-This keeps the editable intent separate from the expensive precomputed warp.
+Pi runtime supports:
+- `model_backend=ncnn`
+- `model_backend=off`
 
-## Trigger modes
+There is no Pi-side ONNX Runtime dependency in this bundle.
 
-### `fixed_rect`
-- tunes `red_roi` and `image_roi`
-- reports live `red_ratio`
-- triggers when `red_ratio >= red_ratio_threshold`
-
-### `dynamic_red_stacked`
-- tunes `upper_band`, `lower_band`, and derived image ROI size/offset
-- extracts a centerline from the red bands
-- first-pass derived image ROI is anchored **above the upper band**
-- this is a clean starting point, not a final tuned policy for every field layout
-
-## Text routing / overlays
-
-`text_sink` controls where debug information goes:
-- `overlay`
-- `status_window`
-- `terminal`
-- `split`
-
-Recommended default is `split`.
-
-This keeps image windows for geometry and uses the status window for numeric state.
-
-## Example commands
+## Helpful Pi commands
 
 ```bash
+./vision_app --help
 ./vision_app --mode probe --device /dev/video0
-./vision_app --mode live --device /dev/video0 --width 160 --height 120 --fps 120
-./vision_app --mode calibrate --config config/profile.conf
-./vision_app --mode deploy --config config/profile.conf
+./vision_app --mode calibrate --config /home/pi/Desktop/vision_app/config/profile.conf
+./vision_app --mode deploy --config /home/pi/Desktop/vision_app/config/profile.conf
 ```
 
-## Calibration controls
+## Automation server path policy
 
-- `enter` / `space`: lock current AprilTag warp
-- `u`: unlock
-- `p`: save profile + rois + warp + report
-- `y`: save warp only
-- `o`: save profile only
-- `q` / `esc`: quit
-- `[` `]`: move step down / up
-- `,` `.`: size step down / up
+The laptop controller treats:
+- `--dataset-root` as **read-only input**
+- `--output-root` as the **only writable root**
 
-### fixed_rect
-- `1`: edit `red_roi`
-- `2`: edit `image_roi`
-- `w a s d`: move
-- `i k`: height - / +
-- `j l`: width - / +
-
-### dynamic_red_stacked
-- `1`: edit `upper_band`
-- `2`: edit `lower_band`
-- `3`: edit derived image ROI config
-- `w s`: move band or ROI bottom offset
-- `i k`: height - / +
-- `j l`: width - / +
-
-## Known limits of this first-pass clean version
-
-- The dynamic mode is intentionally conservative. It is structurally clean and inspectable, but the derived ROI anchoring rule is still a first-pass assumption.
-- The fixed-rect path is the more mature path.
-- The project was reorganized for clarity and future iteration; more tuning keys and config fields can be added without re-entangling the core loops.
-
-## Automation loop (laptop server + Pi collector)
-
-### Laptop side
-
-Run the controller server on your laptop. The dataset root should contain class subfolders of images.
-
-```bash
-python3 laptop_tools/controller_server.py \
-  --dataset-root /path/to/display_images \
-  --output-root /path/to/controller_runs \
-  --port 8787
-```
-
-Open this on the iPad:
+It creates:
 
 ```text
-http://<laptop-ip>:8787/display
-```
-
-### Pi side
-
-Run deploy with automation enabled. The Pi will poll the laptop for the current trial, run the calibrated trigger/model path, and POST results back.
-
-```bash
-./vision_app --mode deploy \
-  --config /home/pi/Desktop/vision_app/config/profile.conf \
-  --automation-enable 1 \
-  --automation-server-url http://<laptop-ip>:8787 \
-  --automation-session demo \
-  --automation-collect-dir /home/pi/Desktop/vision_app/report/automation
-```
-
-### Quick retrain on laptop
-
-Assuming you already have a base Ultralytics classification dataset (`train/val/test`) and the training/export script from this repo:
-
-```bash
-python3 laptop_tools/quick_train.py \
-  --base-dataset /path/to/base_dataset \
-  --run-dir /path/to/controller_runs/session_YYYYMMDD_HHMMSS \
-  --out-dataset /path/to/merged_dataset \
-  --trainer /path/to/eval_export_cls.py \
-  --model /path/to/current_best.pt \
-  --imgsz 128 \
-  --epochs 12 \
-  --batch 64 \
-  --device 0
-```
-
-
-## Automation training loop
-
-### Laptop controller modes
-- `demo`: iPad display + Pi prediction + result logging only. No ROI image saving, no retrain.
-- `collect_retrain`: everything from demo, plus save wrong / low-confidence samples, then optionally trigger retrain after a threshold.
-
-### Start laptop controller
-```bash
-python3 laptop_tools/controller_server.py \
-  --dataset-root /path/to/display_images \
-  --output-root /path/to/controller_runs \
-  --mode demo
-```
-
-Open on iPad:
-```
-http://<laptop-ip>:8787/display
-```
-
-For collection + retrain:
-```bash
-python3 laptop_tools/controller_server.py \
-  --dataset-root /path/to/display_images \
-  --output-root /path/to/controller_runs \
-  --mode collect_retrain \
-  --low-conf-threshold 0.65 \
-  --max-saved-per-class 200 \
-  --max-saved-total 3000 \
-  --disk-cap-mb 2048 \
-  --retrain-threshold 300
-```
-
-### Pi deploy automation
-```bash
-./vision_app --mode deploy \
-  --config /home/pi/Desktop/vision_app/config/profile.conf \
-  --automation-enable 1 \
-  --automation-mode demo \
-  --automation-server-url http://<laptop-ip>:8787
-```
-
-Switch to collection mode:
-```bash
-./vision_app --mode deploy \
-  --config /home/pi/Desktop/vision_app/config/profile.conf \
-  --automation-enable 1 \
-  --automation-mode collect_retrain \
-  --automation-server-url http://<laptop-ip>:8787
-```
-
-### Synthetic + real retrain pipeline
-Use `training_tools/live_tune_aug.py` to export `aug_config.json` for **synthetic data only**. Collected real hard examples are merged directly and are not passed through the live-tuner sequence.
-
-Full pipeline:
-```bash
-python3 training_tools/run_retrain_pipeline.py \
-  --src-dir /path/to/img_dataset \
-  --aug-config /path/to/aug_config.json \
-  --run-dir /path/to/controller_runs/session_xxx \
-  --workspace-root /path/to/training_workspace \
-  --base-model /path/to/yolo26n-cls.pt \
-  --sizes 16,40,128 \
-  --epochs 12 \
-  --batch 64 \
-  --device 0
-```
-
-Outputs are organized under `training_workspace/` into synthetic datasets, merged datasets, training runs, and multi-size summaries.
-
-
-### Output paths and what they mean
-- `controller_runs/session_xxx/results.jsonl`: one line per Pi result post.
-- `controller_runs/session_xxx/hard_examples/<class>/`: wrong predictions kept for retraining.
-- `controller_runs/session_xxx/low_confidence/<class>/`: correct but low-confidence examples, only if collection mode allows them.
-- `training_workspace/synthetic/px16_synthetic/`, `px40_synthetic/`, `px128_synthetic/`: synthetic datasets generated from `img_dataset/` and optional `aug_config.json`.
-- `training_workspace/merged/px16/`, `px40/`, `px128/`: synthetic datasets with real hard examples merged into `train/`.
-- `training_workspace/runs/`: Ultralytics training runs.
-- `training_workspace/reports/multi_size_summary.json`: combined 16/40/128 comparison and recommended deploy size.
-
-### Direction split
-- `demo` = iPad display + Pi prediction + result logging only. No ROI save, no retrain.
-- `collect_retrain` = demo + ROI saving + threshold-based retrain request.
-- `live_tune_aug.py` only affects synthetic generation through `aug_config.json`. It does **not** re-transform collected real hard examples.
-
-
-## Automation output layout
-
-The laptop controller treats `--dataset-root` as **read-only** input and writes **all generated files** under `--output-root`.
-
-Given:
-
-```bash
-python laptop_tools/controller_server.py --dataset-root <display_images> --output-root <automation_root> --mode demo
-```
-
-The server creates:
-
-```text
-<automation_root>/
+output-root/
   sessions/
     session_YYYYMMDD_HHMMSS/
-      session.json
-      results.jsonl
-      hard_examples/
-      low_confidence/
-      correct/
-      rejected/
   workspaces/
     session_YYYYMMDD_HHMMSS/
-      synthetic/
-      merged/
-      runs/
-      reports/
 ```
 
-So:
-- `dataset-root` is never modified
-- collected camera ROI images are saved under `sessions/...`
-- synthetic datasets, merged train/val/test datasets, training runs, exports, and reports are saved under `workspaces/...`
+### `sessions/...`
+Contains runtime collection output:
+- `session.json`
+- `results.jsonl`
+- `hard_examples/`
+- `low_confidence/`
+- `correct/`
+- `rejected/`
 
-If you trigger retraining manually, you can usually omit `--workspace-root`; the helper scripts default to the matching `workspaces/<session>` directory next to the session run folder.
+### `workspaces/...`
+Contains training artifacts:
+- `synthetic/`
+- `merged/`
+- `runs/`
+- `reports/`
+
+Nothing generated should need to spill outside `output-root`.
+
+## Laptop controller
+
+```bash
+python3 laptop_tools/controller_server.py   --dataset-root /path/to/display_images   --output-root /path/to/automation   --mode demo
+```
+
+Open on the iPad:
+
+```text
+http://<laptop-ip>:8787/display
+```
+
+### Controller modes
+- `demo`: show image + receive result + log only
+- `collect_retrain`: also save wrong / low-confidence camera ROI samples
+
+### Pi automation example
+
+```bash
+./vision_app --mode deploy   --config /home/pi/Desktop/vision_app/config/profile.conf   --automation-enable 1   --automation-mode demo   --automation-server-url http://<laptop-ip>:8787
+```
+
+## Training pipeline on laptop
+
+### 1) Tune synthetic augmentation (optional)
+
+```bash
+python3 live_tune_aug.py
+```
+
+This exports `aug_config.json` for **synthetic dataset generation only**.
+Collected real camera ROI images are **not** run through this tuner.
+
+### 2) Full retrain pipeline
+
+```bash
+python3 training_tools/run_retrain_pipeline.py   --src-dir /path/to/img_dataset   --run-dir /path/to/automation/sessions/session_xxx   --workspace-root /path/to/automation/workspaces/session_xxx   --base-model /path/to/yolo26n-cls.pt   --sizes 16,40,128   --epochs 12   --batch 64   --device 0
+```
+
+This will:
+1. generate synthetic datasets for each size
+2. merge collected hard examples into `train/`
+3. train each size from `.pt`
+4. export **ONNX + NCNN**
+5. write `multi_size_summary.json`
+
+## Dataset split logic
+
+For each size, the merged dataset is:
+- `train` = synthetic train + collected hard examples
+- `val` = synthetic val
+- `test` = synthetic test
+
+So the actual datasets used by the trainer live under:
+
+```text
+output-root/workspaces/session_xxx/merged/px16/
+output-root/workspaces/session_xxx/merged/px40/
+output-root/workspaces/session_xxx/merged/px128/
+```
+
+## Pulling updates and discarding local changes
+
+Overwrite tracked local changes completely:
+
+```bash
+cd ~/Desktop/vision_app
+git fetch https://github.com/WYT10/vision_app automation
+git reset --hard FETCH_HEAD
+```
+
+Also remove untracked files/folders:
+
+```bash
+cd ~/Desktop/vision_app
+git fetch https://github.com/WYT10/vision_app automation
+git reset --hard FETCH_HEAD
+git clean -fd
+```
