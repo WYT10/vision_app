@@ -12,6 +12,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include "app_config.hpp"
+#include "automation.hpp"
 #include "app_types.hpp"
 #include "camera.hpp"
 #include "calibrate.hpp"
@@ -36,6 +37,116 @@ inline bool wants_terminal(const AppOptions& opt) {
 }
 
 inline std::string onoff(bool v) { return v ? "on" : "off"; }
+
+inline bool automation_collect_enabled(const AppOptions& opt) {
+    return opt.automation_enable && opt.automation_mode == "collect_retrain";
+}
+
+struct AutomationCollectorState {
+    AutomationTrialState trial;
+    std::string current_trial_id;
+    std::chrono::steady_clock::time_point trial_seen_tp{};
+    std::chrono::steady_clock::time_point last_poll_tp{};
+    int submissions_for_trial = 0;
+    bool have_trial_seen_tp = false;
+    bool have_last_poll_tp = false;
+    std::string last_post_status;
+};
+
+inline bool should_poll_automation(const AppOptions& opt, const AutomationCollectorState& st, std::chrono::steady_clock::time_point now) {
+    if (!opt.automation_enable) return false;
+    if (!st.have_last_poll_tp) return true;
+    const double dt_ms = std::chrono::duration<double, std::milli>(now - st.last_poll_tp).count();
+    return dt_ms >= std::max(50, opt.automation_poll_ms);
+}
+
+inline void maybe_poll_automation(const AppOptions& opt, AutomationCollectorState& st) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!should_poll_automation(opt, st, now)) return;
+    st.last_poll_tp = now;
+    st.have_last_poll_tp = true;
+    AutomationTrialState latest;
+    std::string err;
+    if (!automation_fetch_trial(opt.automation_server_url, latest, err)) {
+        st.last_post_status = std::string("poll err: ") + err;
+        return;
+    }
+    st.trial = latest;
+    if (latest.trial_id != st.current_trial_id) {
+        st.current_trial_id = latest.trial_id;
+        st.trial_seen_tp = now;
+        st.have_trial_seen_tp = true;
+        st.submissions_for_trial = 0;
+        st.last_post_status = std::string("trial=") + latest.trial_id + " label=" + latest.label;
+    }
+}
+
+inline bool should_submit_automation(const AppOptions& opt,
+                                     const AutomationCollectorState& st,
+                                     bool roi_ok,
+                                     const TriggerDebugInfo& dbg,
+                                     const ModelResult& model_res) {
+    if (!opt.automation_enable || !roi_ok || !dbg.triggered || !model_res.ran || !model_res.ok) return false;
+    if (!st.trial.ok || st.current_trial_id.empty() || st.trial.label.empty()) return false;
+    if (!st.have_trial_seen_tp) return false;
+    if (st.submissions_for_trial >= std::max(1, opt.automation_max_per_trial)) return false;
+    const double settle_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - st.trial_seen_tp).count();
+    return settle_ms >= std::max(0, opt.automation_settle_ms);
+}
+
+inline bool automation_should_keep_roi(const AppOptions& opt, const AutomationResultPayload& payload) {
+    if (!automation_collect_enabled(opt)) return false;
+    if (!payload.model_ok) return false;
+    if (!opt.automation_wrong_only) return true;
+    if (!payload.match) return true;
+    return payload.confidence < opt.automation_low_conf_threshold;
+}
+
+inline void submit_automation_result(const AppOptions& opt,
+                                     AutomationCollectorState& st,
+                                     const ModelResult& model_res,
+                                     const TriggerDebugInfo& dbg,
+                                     const RoiRuntimeData& roi_info) {
+    AutomationResultPayload payload;
+    payload.session = st.trial.session.empty() ? opt.automation_session : st.trial.session;
+    payload.trial_id = st.trial.trial_id;
+    payload.expected_label = st.trial.label;
+    payload.image_name = st.trial.image_name;
+    payload.predicted_label = model_res.best.label;
+    payload.confidence = model_res.best.score;
+    payload.match = !payload.expected_label.empty() && payload.expected_label == payload.predicted_label;
+    payload.triggered = dbg.triggered;
+    payload.model_ok = model_res.ok;
+    payload.infer_ms = model_res.infer_ms;
+    payload.model_summary = model_res.summary;
+    payload.client_mode = opt.automation_mode;
+
+    const bool keep_roi = automation_should_keep_roi(opt, payload);
+    if (keep_roi) payload.roi_jpg_b64 = automation_encode_roi_jpg(roi_info.image_bgr);
+
+    std::string manifest_err;
+    if (automation_collect_enabled(opt) && !opt.automation_collect_dir.empty()) {
+        std::filesystem::create_directories(opt.automation_collect_dir);
+        automation_append_manifest((std::filesystem::path(opt.automation_collect_dir) / "results.jsonl").string(), payload, manifest_err);
+        if (keep_roi && !roi_info.image_bgr.empty()) {
+            const std::string label_dir = payload.expected_label.empty() ? "unknown" : payload.expected_label;
+            std::filesystem::create_directories(std::filesystem::path(opt.automation_collect_dir) / "hard_examples" / label_dir);
+            std::ostringstream name;
+            name << payload.trial_id << "__pred_" << (payload.predicted_label.empty() ? "none" : payload.predicted_label)
+                 << "__" << std::fixed << std::setprecision(3) << payload.confidence << ".jpg";
+            cv::imwrite((std::filesystem::path(opt.automation_collect_dir) / "hard_examples" / label_dir / name.str()).string(), roi_info.image_bgr);
+        }
+    }
+
+    std::string response, post_err;
+    if (!automation_post_result(opt.automation_server_url, payload, response, post_err)) {
+        st.last_post_status = std::string("post err: ") + post_err;
+    } else {
+        st.last_post_status = std::string("posted trial=") + payload.trial_id + " match=" + (payload.match ? "1" : "0");
+    }
+    if (!manifest_err.empty()) st.last_post_status += std::string(" manifest=") + manifest_err;
+    st.submissions_for_trial += 1;
+}
 
 inline bool save_crop_if_needed(const std::string& dir,
                                 const std::string& prefix,
@@ -113,6 +224,9 @@ inline std::vector<std::string> build_deploy_status_lines(const AppOptions& opt,
         b << "overlap_w=" << dbg.overlap_width_ratio << "  cx=" << dbg.center_x_px << "  top=" << dbg.bar_top_y_px << "  triggered=" << (dbg.triggered ? 1 : 0);
         lines.push_back(a.str());
         lines.push_back(b.str());
+    }
+    if (opt.automation_enable) {
+        lines.push_back(std::string("automation: ") + opt.automation_server_url + " session=" + opt.automation_session + " mode=" + opt.automation_mode);
     }
     lines.push_back(std::string("model: ") + (model_res.ran ? model_res.summary : "idle"));
     std::ostringstream perf;
@@ -404,8 +518,10 @@ inline bool run_deploy(AppOptions& opt, std::string& err) {
     Clock::time_point last_model_tp{};
     bool have_last_model_tp = false;
     int frame_idx = 0;
+    AutomationCollectorState automation_state;
 
     while (true) {
+        maybe_poll_automation(opt, automation_state);
         auto frame_t0 = Clock::now();
         if (!grab_latest_frame(cap, opt.latest_only, opt.drain_grabs, frame)) { err = "failed to read frame"; break; }
 
@@ -439,6 +555,10 @@ inline bool run_deploy(AppOptions& opt, std::string& err) {
             }
             last_model_tp = Clock::now();
             have_last_model_tp = true;
+        }
+
+        if (should_submit_automation(opt, automation_state, roi_ok, dbg, model_res)) {
+            submit_automation_result(opt, automation_state, model_res, dbg, roi_info);
         }
 
         if (roi_ok && opt.save_every_n > 0 && (frame_idx % opt.save_every_n) == 0) {

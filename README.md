@@ -143,3 +143,137 @@ This keeps image windows for geometry and uses the status window for numeric sta
 - The dynamic mode is intentionally conservative. It is structurally clean and inspectable, but the derived ROI anchoring rule is still a first-pass assumption.
 - The fixed-rect path is the more mature path.
 - The project was reorganized for clarity and future iteration; more tuning keys and config fields can be added without re-entangling the core loops.
+
+## Automation loop (laptop server + Pi collector)
+
+### Laptop side
+
+Run the controller server on your laptop. The dataset root should contain class subfolders of images.
+
+```bash
+python3 laptop_tools/controller_server.py \
+  --dataset-root /path/to/display_images \
+  --output-root /path/to/controller_runs \
+  --port 8787
+```
+
+Open this on the iPad:
+
+```text
+http://<laptop-ip>:8787/display
+```
+
+### Pi side
+
+Run deploy with automation enabled. The Pi will poll the laptop for the current trial, run the calibrated trigger/model path, and POST results back.
+
+```bash
+./vision_app --mode deploy \
+  --config /home/pi/Desktop/vision_app/config/profile.conf \
+  --automation-enable 1 \
+  --automation-server-url http://<laptop-ip>:8787 \
+  --automation-session demo \
+  --automation-collect-dir /home/pi/Desktop/vision_app/report/automation
+```
+
+### Quick retrain on laptop
+
+Assuming you already have a base Ultralytics classification dataset (`train/val/test`) and the training/export script from this repo:
+
+```bash
+python3 laptop_tools/quick_train.py \
+  --base-dataset /path/to/base_dataset \
+  --run-dir /path/to/controller_runs/session_YYYYMMDD_HHMMSS \
+  --out-dataset /path/to/merged_dataset \
+  --trainer /path/to/eval_export_cls.py \
+  --model /path/to/current_best.pt \
+  --imgsz 128 \
+  --epochs 12 \
+  --batch 64 \
+  --device 0
+```
+
+
+## Automation training loop
+
+### Laptop controller modes
+- `demo`: iPad display + Pi prediction + result logging only. No ROI image saving, no retrain.
+- `collect_retrain`: everything from demo, plus save wrong / low-confidence samples, then optionally trigger retrain after a threshold.
+
+### Start laptop controller
+```bash
+python3 laptop_tools/controller_server.py \
+  --dataset-root /path/to/display_images \
+  --output-root /path/to/controller_runs \
+  --mode demo
+```
+
+Open on iPad:
+```
+http://<laptop-ip>:8787/display
+```
+
+For collection + retrain:
+```bash
+python3 laptop_tools/controller_server.py \
+  --dataset-root /path/to/display_images \
+  --output-root /path/to/controller_runs \
+  --mode collect_retrain \
+  --low-conf-threshold 0.65 \
+  --max-saved-per-class 200 \
+  --max-saved-total 3000 \
+  --disk-cap-mb 2048 \
+  --retrain-threshold 300
+```
+
+### Pi deploy automation
+```bash
+./vision_app --mode deploy \
+  --config /home/pi/Desktop/vision_app/config/profile.conf \
+  --automation-enable 1 \
+  --automation-mode demo \
+  --automation-server-url http://<laptop-ip>:8787
+```
+
+Switch to collection mode:
+```bash
+./vision_app --mode deploy \
+  --config /home/pi/Desktop/vision_app/config/profile.conf \
+  --automation-enable 1 \
+  --automation-mode collect_retrain \
+  --automation-server-url http://<laptop-ip>:8787
+```
+
+### Synthetic + real retrain pipeline
+Use `training_tools/live_tune_aug.py` to export `aug_config.json` for **synthetic data only**. Collected real hard examples are merged directly and are not passed through the live-tuner sequence.
+
+Full pipeline:
+```bash
+python3 training_tools/run_retrain_pipeline.py \
+  --src-dir /path/to/img_dataset \
+  --aug-config /path/to/aug_config.json \
+  --run-dir /path/to/controller_runs/session_xxx \
+  --workspace-root /path/to/training_workspace \
+  --base-model /path/to/yolo26n-cls.pt \
+  --sizes 16,40,128 \
+  --epochs 12 \
+  --batch 64 \
+  --device 0
+```
+
+Outputs are organized under `training_workspace/` into synthetic datasets, merged datasets, training runs, and multi-size summaries.
+
+
+### Output paths and what they mean
+- `controller_runs/session_xxx/results.jsonl`: one line per Pi result post.
+- `controller_runs/session_xxx/hard_examples/<class>/`: wrong predictions kept for retraining.
+- `controller_runs/session_xxx/low_confidence/<class>/`: correct but low-confidence examples, only if collection mode allows them.
+- `training_workspace/synthetic/px16_synthetic/`, `px40_synthetic/`, `px128_synthetic/`: synthetic datasets generated from `img_dataset/` and optional `aug_config.json`.
+- `training_workspace/merged/px16/`, `px40/`, `px128/`: synthetic datasets with real hard examples merged into `train/`.
+- `training_workspace/runs/`: Ultralytics training runs.
+- `training_workspace/reports/multi_size_summary.json`: combined 16/40/128 comparison and recommended deploy size.
+
+### Direction split
+- `demo` = iPad display + Pi prediction + result logging only. No ROI save, no retrain.
+- `collect_retrain` = demo + ROI saving + threshold-based retrain request.
+- `live_tune_aug.py` only affects synthetic generation through `aug_config.json`. It does **not** re-transform collected real hard examples.

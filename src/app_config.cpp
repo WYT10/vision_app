@@ -185,6 +185,16 @@ bool load_profile_config(const std::string& path, AppOptions& o, std::string& er
         else if (k == "save_image_roi_dir") o.save_image_roi_dir = v;
         else if (k == "save_red_roi_dir") o.save_red_roi_dir = v;
         else if (k == "save_every_n") o.save_every_n = std::stoi(v);
+        else if (k == "automation_enable") o.automation_enable = parse_bool(v);
+        else if (k == "automation_mode") o.automation_mode = v;
+        else if (k == "automation_server_url") o.automation_server_url = v;
+        else if (k == "automation_session") o.automation_session = v;
+        else if (k == "automation_collect_dir") o.automation_collect_dir = v;
+        else if (k == "automation_poll_ms") o.automation_poll_ms = std::stoi(v);
+        else if (k == "automation_settle_ms") o.automation_settle_ms = std::stoi(v);
+        else if (k == "automation_max_per_trial") o.automation_max_per_trial = std::stoi(v);
+        else if (k == "automation_wrong_only") o.automation_wrong_only = parse_bool(v);
+        else if (k == "automation_low_conf_threshold") o.automation_low_conf_threshold = std::stod(v);
     }
     return true;
 }
@@ -268,7 +278,17 @@ bool save_profile_config(const std::string& path, const AppOptions& o, std::stri
         << "run_model=" << bool_str(o.run_model) << "\n"
         << "save_image_roi_dir=" << o.save_image_roi_dir << "\n"
         << "save_red_roi_dir=" << o.save_red_roi_dir << "\n"
-        << "save_every_n=" << o.save_every_n << "\n";
+        << "save_every_n=" << o.save_every_n << "\n"
+        << "automation_enable=" << bool_str(o.automation_enable) << "\n"
+        << "automation_mode=" << o.automation_mode << "\n"
+        << "automation_server_url=" << o.automation_server_url << "\n"
+        << "automation_session=" << o.automation_session << "\n"
+        << "automation_collect_dir=" << o.automation_collect_dir << "\n"
+        << "automation_poll_ms=" << o.automation_poll_ms << "\n"
+        << "automation_settle_ms=" << o.automation_settle_ms << "\n"
+        << "automation_max_per_trial=" << o.automation_max_per_trial << "\n"
+        << "automation_wrong_only=" << bool_str(o.automation_wrong_only) << "\n"
+        << "automation_low_conf_threshold=" << o.automation_low_conf_threshold << "\n";
     return true;
 }
 
@@ -284,6 +304,7 @@ void resolve_profile_paths(const std::string& config_path, AppOptions& opt) {
     opt.save_report = resolve_file_like_path(opt.save_report, project_root);
     opt.save_image_roi_dir = resolve_file_like_path(opt.save_image_roi_dir, project_root);
     opt.save_red_roi_dir = resolve_file_like_path(opt.save_red_roi_dir, project_root);
+    opt.automation_collect_dir = resolve_file_like_path(opt.automation_collect_dir, project_root);
     opt.model_cfg.onnx_path = resolve_file_like_path(opt.model_cfg.onnx_path, project_root);
     opt.model_cfg.ncnn_param_path = resolve_file_like_path(opt.model_cfg.ncnn_param_path, project_root);
     opt.model_cfg.ncnn_bin_path = resolve_file_like_path(opt.model_cfg.ncnn_bin_path, project_root);
@@ -387,6 +408,18 @@ Status / UI:
   --text-sink overlay|status_window|terminal|split
   --show-status-window 1
 
+Automation:
+  --automation-enable 1
+  --automation-mode demo|collect_retrain
+  --automation-server-url http://LAPTOP_IP:8787
+  --automation-session demo
+  --automation-collect-dir report/automation
+  --automation-poll-ms 250
+  --automation-settle-ms 700
+  --automation-max-per-trial 1
+  --automation-wrong-only 1
+  --automation-low-conf-threshold 0.65
+
 Notes:
   - For probe, /dev/video* uses v4l2-ctl enumeration.
   - RTSP / HTTP sources fall back to OpenCV probe and show observed stream properties.
@@ -399,6 +432,7 @@ Examples:
   ./vision_app --mode live --device /dev/video0 --width 160 --height 120 --fps 120
   ./vision_app --mode calibrate --config /home/pi/Desktop/vision_app/config/profile.conf
   ./vision_app --mode deploy --config /home/pi/Desktop/vision_app/config/profile.conf
+  ./vision_app --mode deploy --config /home/pi/Desktop/vision_app/config/profile.conf --automation-enable 1 --automation-server-url http://192.168.0.10:8787
 )TXT";
 }
 

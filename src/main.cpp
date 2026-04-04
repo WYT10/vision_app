@@ -132,6 +132,16 @@ int main(int argc, char** argv) {
             else if (a == "--save-image-roi-dir") opt.save_image_roi_dir = need(i, argc, argv, "--save-image-roi-dir");
             else if (a == "--save-red-roi-dir") opt.save_red_roi_dir = need(i, argc, argv, "--save-red-roi-dir");
             else if (a == "--save-every-n") opt.save_every_n = std::stoi(need(i, argc, argv, "--save-every-n"));
+            else if (a == "--automation-enable") opt.automation_enable = parse_bool(need(i, argc, argv, "--automation-enable"));
+            else if (a == "--automation-mode") opt.automation_mode = need(i, argc, argv, "--automation-mode");
+            else if (a == "--automation-server-url") opt.automation_server_url = need(i, argc, argv, "--automation-server-url");
+            else if (a == "--automation-session") opt.automation_session = need(i, argc, argv, "--automation-session");
+            else if (a == "--automation-collect-dir") opt.automation_collect_dir = need(i, argc, argv, "--automation-collect-dir");
+            else if (a == "--automation-poll-ms") opt.automation_poll_ms = std::stoi(need(i, argc, argv, "--automation-poll-ms"));
+            else if (a == "--automation-settle-ms") opt.automation_settle_ms = std::stoi(need(i, argc, argv, "--automation-settle-ms"));
+            else if (a == "--automation-max-per-trial") opt.automation_max_per_trial = std::stoi(need(i, argc, argv, "--automation-max-per-trial"));
+            else if (a == "--automation-wrong-only") opt.automation_wrong_only = parse_bool(need(i, argc, argv, "--automation-wrong-only"));
+            else if (a == "--automation-low-conf-threshold") opt.automation_low_conf_threshold = std::stod(need(i, argc, argv, "--automation-low-conf-threshold"));
             else throw std::runtime_error("unknown argument: " + a);
         }
 

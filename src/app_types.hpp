@@ -65,6 +65,17 @@ struct AppOptions {
     std::string save_image_roi_dir;
     std::string save_red_roi_dir;
     int save_every_n = 0;
+
+    bool automation_enable = false;
+    std::string automation_mode = "demo"; // demo | collect_retrain
+    std::string automation_server_url = "http://127.0.0.1:8787";
+    std::string automation_session = "default";
+    std::string automation_collect_dir = "report/automation";
+    int automation_poll_ms = 250;
+    int automation_settle_ms = 700;
+    int automation_max_per_trial = 1;
+    bool automation_wrong_only = true;
+    double automation_low_conf_threshold = 0.65;
 };
 
 } // namespace vision_app
