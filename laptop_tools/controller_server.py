@@ -29,6 +29,7 @@ class ControllerState:
     def __init__(self,
                  dataset_root: Path,
                  output_root: Path,
+                 workspace_root: Path | None,
                  mode: str,
                  auto_advance: bool,
                  seed: int,
@@ -39,8 +40,11 @@ class ControllerState:
                  retrain_threshold: int,
                  auto_run_retrain_cmd: str,
                  save_wrong_only: bool) -> None:
-        self.dataset_root = dataset_root
-        self.output_root = output_root
+        self.dataset_root = dataset_root.resolve()
+        self.output_root = output_root.resolve()
+        self.sessions_root = self.output_root / 'sessions'
+        default_workspace_root = self.output_root / 'workspaces'
+        self.workspaces_root = (workspace_root.resolve() if workspace_root else default_workspace_root.resolve())
         self.mode = mode
         self.auto_advance = auto_advance
         self.low_conf_threshold = low_conf_threshold
@@ -60,13 +64,15 @@ class ControllerState:
         self.trial_id = self._make_trial_id()
         self.lock = threading.Lock()
         self.current_result: Optional[dict] = None
-        self.run_dir = output_root / self.session
+        self.run_dir = self.sessions_root / self.session
+        self.workspace_dir = self.workspaces_root / self.session
         self.results_path = self.run_dir / 'results.jsonl'
         self.hard_dir = self.run_dir / 'hard_examples'
         self.lowconf_dir = self.run_dir / 'low_confidence'
         self.correct_dir = self.run_dir / 'correct'
         self.rejected_dir = self.run_dir / 'rejected'
-        for d in (self.run_dir, self.hard_dir, self.lowconf_dir, self.correct_dir, self.rejected_dir):
+        for d in (self.sessions_root, self.workspaces_root, self.run_dir, self.workspace_dir,
+                  self.hard_dir, self.lowconf_dir, self.correct_dir, self.rejected_dir):
             d.mkdir(parents=True, exist_ok=True)
         self.saved_total = 0
         self.saved_bytes = 0
@@ -95,7 +101,11 @@ class ControllerState:
             'session': self.session,
             'mode': self.mode,
             'dataset_root': str(self.dataset_root),
+            'output_root': str(self.output_root),
+            'sessions_root': str(self.sessions_root),
+            'workspaces_root': str(self.workspaces_root),
             'run_dir': str(self.run_dir),
+            'workspace_dir': str(self.workspace_dir),
             'low_conf_threshold': self.low_conf_threshold,
             'max_saved_per_class': self.max_saved_per_class,
             'max_saved_total': self.max_saved_total,
@@ -177,7 +187,14 @@ class ControllerState:
         def worker() -> None:
             self.retrain_running = True
             self.last_retrain_status = 'running'
-            cmd = self.auto_run_retrain_cmd.format(run_dir=str(self.run_dir), session=self.session)
+            cmd = self.auto_run_retrain_cmd.format(
+                run_dir=str(self.run_dir),
+                workspace_dir=str(self.workspace_dir),
+                session=self.session,
+                output_root=str(self.output_root),
+                sessions_root=str(self.sessions_root),
+                workspaces_root=str(self.workspaces_root),
+            )
             try:
                 rc = subprocess.call(cmd, shell=True)
                 self.last_retrain_status = f'finished_rc_{rc}'
@@ -226,6 +243,9 @@ class ControllerState:
             'retrain_requested': self.retrain_requested,
             'retrain_running': self.retrain_running,
             'last_retrain_status': self.last_retrain_status,
+            'output_root': str(self.output_root),
+            'run_dir': str(self.run_dir),
+            'workspace_dir': str(self.workspace_dir),
             'current': self.current_payload(),
         }
 
@@ -346,7 +366,8 @@ setInterval(tick, 300); tick();
 def main() -> int:
     ap = argparse.ArgumentParser(description='Laptop controller server for iPad display + Pi result collection.')
     ap.add_argument('--dataset-root', required=True, help='Folder with class subfolders of images displayed on the iPad')
-    ap.add_argument('--output-root', default='runs/controller', help='Where session results are stored')
+    ap.add_argument('--output-root', default='runs/controller', help='Writable root. Server creates sessions/ and workspaces/ under this folder')
+    ap.add_argument('--workspace-root', default='', help='Optional override for training workspaces root; default is <output-root>/workspaces')
     ap.add_argument('--mode', choices=['demo', 'collect_retrain'], default='demo')
     ap.add_argument('--host', default='0.0.0.0')
     ap.add_argument('--port', type=int, default=8787)
@@ -361,9 +382,11 @@ def main() -> int:
     ap.add_argument('--auto-run-retrain-cmd', default='', help='Optional shell command launched once when retrain threshold is reached; may use {run_dir} and {session}')
     args = ap.parse_args()
 
+    workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
     state = ControllerState(
         dataset_root=Path(args.dataset_root).resolve(),
         output_root=Path(args.output_root).resolve(),
+        workspace_root=workspace_root,
         mode=args.mode,
         auto_advance=not args.no_auto_advance,
         seed=args.seed,
@@ -381,7 +404,9 @@ def main() -> int:
     print(f'session:          {state.session}')
     print(f'mode:             {state.mode}')
     print(f'dataset items:    {len(state.items)}')
+    print(f'output root:      {state.output_root}')
     print(f'run dir:          {state.run_dir}')
+    print(f'workspace dir:    {state.workspace_dir}')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

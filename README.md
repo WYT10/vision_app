@@ -42,55 +42,6 @@ vision_app/
     └── trigger.cpp
 ```
 
-## Pulling updates and overwriting local changes
-
-If you want to ignore local changes and let the remote branch overwrite your local tracked files, including `config/profile.conf`, use:
-
-```bash
-cd ~/Desktop/vision_app
-git fetch https://github.com/WYT10/vision_app automation
-git reset --hard FETCH_HEAD
-```
-
-This will:
-- discard local edits in tracked files
-- move your working tree to the pulled `automation` branch tip
-- overwrite local config changes
-
-If you also want to remove untracked local files and folders:
-
-```bash
-cd ~/Desktop/vision_app
-git fetch https://github.com/WYT10/vision_app automation
-git reset --hard FETCH_HEAD
-git clean -fd
-```
-
-Use `git clean -fd` carefully. It deletes untracked files and directories.
-
-### Recommended overwrite-all update flow
-
-```bash
-cd ~/Desktop/vision_app
-git fetch https://github.com/WYT10/vision_app automation
-git reset --hard FETCH_HEAD
-
-export CMAKE_PREFIX_PATH=/home/pi/ncnn/build/install:$CMAKE_PREFIX_PATH
-rm -rf build
-mkdir -p build
-cd build
-cmake ..
-make -j$(nproc)
-```
-
-### If you only want to overwrite `config/profile.conf`
-
-```bash
-cd ~/Desktop/vision_app
-git checkout -- config/profile.conf
-git pull https://github.com/WYT10/vision_app automation
-```
-
 ## Build
 
 Use this exactly:
@@ -326,3 +277,41 @@ Outputs are organized under `training_workspace/` into synthetic datasets, merge
 - `demo` = iPad display + Pi prediction + result logging only. No ROI save, no retrain.
 - `collect_retrain` = demo + ROI saving + threshold-based retrain request.
 - `live_tune_aug.py` only affects synthetic generation through `aug_config.json`. It does **not** re-transform collected real hard examples.
+
+
+## Automation output layout
+
+The laptop controller treats `--dataset-root` as **read-only** input and writes **all generated files** under `--output-root`.
+
+Given:
+
+```bash
+python laptop_tools/controller_server.py --dataset-root <display_images> --output-root <automation_root> --mode demo
+```
+
+The server creates:
+
+```text
+<automation_root>/
+  sessions/
+    session_YYYYMMDD_HHMMSS/
+      session.json
+      results.jsonl
+      hard_examples/
+      low_confidence/
+      correct/
+      rejected/
+  workspaces/
+    session_YYYYMMDD_HHMMSS/
+      synthetic/
+      merged/
+      runs/
+      reports/
+```
+
+So:
+- `dataset-root` is never modified
+- collected camera ROI images are saved under `sessions/...`
+- synthetic datasets, merged train/val/test datasets, training runs, exports, and reports are saved under `workspaces/...`
+
+If you trigger retraining manually, you can usually omit `--workspace-root`; the helper scripts default to the matching `workspaces/<session>` directory next to the session run folder.

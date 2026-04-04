@@ -20,7 +20,7 @@ def main() -> int:
     ap.add_argument('--src-dir', required=True, help='Synthetic source img_dataset root')
     ap.add_argument('--aug-config', default='', help='Optional aug_config.json from live_tune_aug.py; synthetic only')
     ap.add_argument('--run-dir', required=True, help='Controller session run dir with hard_examples/')
-    ap.add_argument('--workspace-root', required=True, help='Root for synthetic / merged / runs / exports / reports')
+    ap.add_argument('--workspace-root', default='', help='Root for synthetic / merged / runs / exports / reports. Default: sibling workspaces/<session> next to run-dir')
     ap.add_argument('--base-model', default='yolo26n-cls.pt')
     ap.add_argument('--sizes', default='16,40,128')
     ap.add_argument('--epochs', type=int, default=12)
@@ -36,7 +36,8 @@ def main() -> int:
     merge = project_root / 'training_tools' / 'merge_hard_examples.py'
     trainer = project_root / 'training_tools' / 'eval_export_cls.py'
 
-    workspace = Path(args.workspace_root).resolve()
+    run_dir = Path(args.run_dir).resolve()
+    workspace = Path(args.workspace_root).resolve() if args.workspace_root else (run_dir.parents[1] / 'workspaces' / run_dir.name)
     (workspace / 'synthetic').mkdir(parents=True, exist_ok=True)
     (workspace / 'merged').mkdir(parents=True, exist_ok=True)
     (workspace / 'reports').mkdir(parents=True, exist_ok=True)
@@ -67,7 +68,7 @@ def main() -> int:
         merge_cmd = [
             sys.executable, str(merge),
             '--base-dataset', str(synthetic_dir),
-            '--run-dir', str(Path(args.run_dir).resolve()),
+            '--run-dir', str(run_dir),
             '--out-dataset', str(merged_dir),
             '--max-per-class', str(args.max_hard_per_class),
             '--overwrite',
