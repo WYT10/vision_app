@@ -355,8 +355,7 @@ inline bool automation_append_manifest(const std::string& path, const Automation
         << automation_detail::json_field_number("infer_ms", payload.infer_ms) << ','
         << automation_detail::json_field_string("model_summary", payload.model_summary) << ','
         << automation_detail::json_field_string("client_mode", payload.client_mode)
-        << "}
-";
+        << "}\n";
     return true;
 }
 
