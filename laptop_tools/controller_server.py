@@ -3,418 +3,566 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
-import random
-import shutil
-import subprocess
+import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-IMG_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+from PIL import Image, ImageOps
+
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
+
+# ---------- stimulus format ----------
+STIM_IMAGE_W = 240
+STIM_IMAGE_H = 240
+STIM_RED_W = 240
+STIM_RED_H = 100
+STIM_GAP_H = 20
+STIM_BG = (255, 255, 255)
+STIM_RED = (255, 0, 0)
+
+# calibration tag content shown on /calibrate_tag
+APRILTAG_FAMILY = "36h11"
+APRILTAG_ID = 0
+
+# collect policy (kept as constants so server args stay minimal)
+LOW_CONF_THRESHOLD = 0.65
+MAX_SAVED_PER_CLASS = 200
+MAX_SAVED_TOTAL = 3000
+DISK_CAP_MB = 2048
+AUTO_ADVANCE = True
+
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 @dataclass
-class TrialItem:
+class Item:
     label: str
-    image_path: Path
+    path: str
+    relpath: str
+    name: str
 
 
-class ControllerState:
-    def __init__(self,
-                 dataset_root: Path,
-                 output_root: Path,
-                 workspace_root: Path | None,
-                 mode: str,
-                 auto_advance: bool,
-                 seed: int,
-                 low_conf_threshold: float,
-                 max_saved_per_class: int,
-                 max_saved_total: int,
-                 disk_cap_mb: int,
-                 retrain_threshold: int,
-                 auto_run_retrain_cmd: str,
-                 save_wrong_only: bool) -> None:
+@dataclass
+class CurrentTrial:
+    session: str
+    trial_id: str
+    label: str
+    relpath: str
+    image_name: str
+    item_index: int
+    mode: str
+
+
+def safe_name(s: str) -> str:
+    out = []
+    for ch in s:
+        out.append(ch if (ch.isalnum() or ch in ("_", "-", ".")) else "_")
+    return "".join(out)
+
+
+def image_to_png_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def build_demo_stimulus(src_path: Path) -> bytes:
+    src = Image.open(src_path).convert("RGB")
+    obj = ImageOps.pad(
+        src,
+        (STIM_IMAGE_W, STIM_IMAGE_H),
+        method=Image.Resampling.BILINEAR,
+        color=STIM_BG,
+        centering=(0.5, 0.5),
+    )
+
+    total_w = max(STIM_IMAGE_W, STIM_RED_W)
+    total_h = STIM_IMAGE_H + STIM_GAP_H + STIM_RED_H
+    canvas = Image.new("RGB", (total_w, total_h), STIM_BG)
+
+    canvas.paste(obj, ((total_w - STIM_IMAGE_W) // 2, 0))
+    red = Image.new("RGB", (STIM_RED_W, STIM_RED_H), STIM_RED)
+    canvas.paste(red, ((total_w - STIM_RED_W) // 2, STIM_IMAGE_H + STIM_GAP_H))
+    return image_to_png_bytes(canvas)
+
+
+def build_apriltag_core(size: int = STIM_IMAGE_W) -> Image.Image:
+    if cv2 is None or not hasattr(cv2, "aruco"):
+        img = Image.new("L", (size, size), 255)
+        step = max(8, size // 12)
+        for i in range(0, size, step):
+            for j in range(0, size, step):
+                if ((i // step) + (j // step)) % 2 == 0:
+                    for y in range(j, min(size, j + step)):
+                        for x in range(i, min(size, i + step)):
+                            img.putpixel((x, y), 0)
+        return img.convert("RGB")
+
+    family_map = {
+        "16h5": cv2.aruco.DICT_APRILTAG_16h5,
+        "25h9": cv2.aruco.DICT_APRILTAG_25h9,
+        "36h11": cv2.aruco.DICT_APRILTAG_36h11,
+    }
+    dict_id = family_map.get(APRILTAG_FAMILY, cv2.aruco.DICT_APRILTAG_36h11)
+    dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
+
+    if hasattr(cv2.aruco, "generateImageMarker"):
+        marker = cv2.aruco.generateImageMarker(dictionary, APRILTAG_ID, size)
+    else:
+        marker = cv2.aruco.drawMarker(dictionary, APRILTAG_ID, size)
+
+    return Image.fromarray(marker).convert("RGB")
+
+
+def build_tag_stimulus() -> bytes:
+    tag_img = ImageOps.pad(
+        build_apriltag_core(STIM_IMAGE_W),
+        (STIM_IMAGE_W, STIM_IMAGE_H),
+        method=Image.Resampling.NEAREST,
+        color=STIM_BG,
+        centering=(0.5, 0.5),
+    )
+
+    total_w = max(STIM_IMAGE_W, STIM_RED_W)
+    total_h = STIM_IMAGE_H + STIM_GAP_H + STIM_RED_H
+    canvas = Image.new("RGB", (total_w, total_h), STIM_BG)
+
+    canvas.paste(tag_img, ((total_w - STIM_IMAGE_W) // 2, 0))
+    red = Image.new("RGB", (STIM_RED_W, STIM_RED_H), STIM_RED)
+    canvas.paste(red, ((total_w - STIM_RED_W) // 2, STIM_IMAGE_H + STIM_GAP_H))
+    return image_to_png_bytes(canvas)
+
+
+def display_html() -> bytes:
+    html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>vision_app display</title>
+<style>
+html,body{margin:0;padding:0;background:#fff;width:100%;height:100%;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center}
+img{max-width:95vw;max-height:95vh;object-fit:contain}
+.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555}
+</style>
+</head>
+<body>
+  <img id="stim" src="/img" alt="stimulus">
+  <div class="info" id="info">connecting...</div>
+<script>
+async function refreshMeta(){
+  try{
+    const r = await fetch('/api/current?t=' + Date.now(), {cache:'no-store'});
+    const j = await r.json();
+    document.getElementById('info').textContent =
+      'trial=' + j.trial_id + ' label=' + j.label + ' mode=' + j.mode;
+  }catch(e){
+    document.getElementById('info').textContent = 'server not ready';
+  }
+}
+function refreshImg(){ document.getElementById('stim').src = '/img?t=' + Date.now(); }
+setInterval(refreshImg, 500);
+setInterval(refreshMeta, 500);
+refreshImg();
+refreshMeta();
+</script>
+</body>
+</html>"""
+    return html.encode("utf-8")
+
+
+def tag_html() -> bytes:
+    html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>vision_app calibrate tag</title>
+<style>
+html,body{margin:0;padding:0;background:#fff;width:100%;height:100%;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center}
+img{max-width:95vw;max-height:95vh;object-fit:contain}
+.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555}
+</style>
+</head>
+<body>
+  <img id="stim" src="/tag" alt="apriltag stimulus">
+  <div class="info">apriltag stimulus · same format as demo</div>
+<script>
+function refreshImg(){ document.getElementById('stim').src = '/tag?t=' + Date.now(); }
+setInterval(refreshImg, 1000);
+refreshImg();
+</script>
+</body>
+</html>"""
+    return html.encode("utf-8")
+
+
+class SessionState:
+    def __init__(self, dataset_root: Path, output_root: Path, mode: str) -> None:
         self.dataset_root = dataset_root.resolve()
         self.output_root = output_root.resolve()
-        self.sessions_root = self.output_root / 'sessions'
-        default_workspace_root = self.output_root / 'workspaces'
-        self.workspaces_root = (workspace_root.resolve() if workspace_root else default_workspace_root.resolve())
         self.mode = mode
-        self.auto_advance = auto_advance
-        self.low_conf_threshold = low_conf_threshold
-        self.max_saved_per_class = max_saved_per_class
-        self.max_saved_total = max_saved_total
-        self.max_saved_bytes = max(0, disk_cap_mb) * 1024 * 1024
-        self.retrain_threshold = retrain_threshold
-        self.auto_run_retrain_cmd = auto_run_retrain_cmd
-        self.save_wrong_only = save_wrong_only
-        self.rng = random.Random(seed)
-        self.items: List[TrialItem] = self._scan_items(dataset_root)
-        if not self.items:
-            raise RuntimeError(f'No images found under {dataset_root}')
-        self.session = time.strftime('session_%Y%m%d_%H%M%S')
-        self.version = 0
-        self.index = 0
-        self.trial_id = self._make_trial_id()
-        self.lock = threading.Lock()
-        self.current_result: Optional[dict] = None
+
+        self.sessions_root = self.output_root / "sessions"
+        self.workspaces_root = self.output_root / "workspaces"
+        self.sessions_root.mkdir(parents=True, exist_ok=True)
+        self.workspaces_root.mkdir(parents=True, exist_ok=True)
+
+        self.session = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.run_dir = self.sessions_root / self.session
         self.workspace_dir = self.workspaces_root / self.session
-        self.results_path = self.run_dir / 'results.jsonl'
-        self.hard_dir = self.run_dir / 'hard_examples'
-        self.lowconf_dir = self.run_dir / 'low_confidence'
-        self.correct_dir = self.run_dir / 'correct'
-        self.rejected_dir = self.run_dir / 'rejected'
-        for d in (self.sessions_root, self.workspaces_root, self.run_dir, self.workspace_dir,
-                  self.hard_dir, self.lowconf_dir, self.correct_dir, self.rejected_dir):
-            d.mkdir(parents=True, exist_ok=True)
-        self.saved_total = 0
-        self.saved_bytes = 0
-        self.saved_per_class: Dict[str, int] = {}
-        self.retrain_requested = False
-        self.retrain_running = False
-        self.last_retrain_status = 'idle'
-        self.session_info_path = self.run_dir / 'session.json'
-        self._write_session_info()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    def _scan_items(self, root: Path) -> List[TrialItem]:
-        items: List[TrialItem] = []
-        for class_dir in sorted(root.iterdir()):
-            if not class_dir.is_dir() or class_dir.name.startswith('.'):
+        self.items = self._scan_items()
+        if not self.items:
+            raise RuntimeError(f"No images found under dataset root: {self.dataset_root}")
+
+        self.lock = threading.Lock()
+        self.current_index = 0
+        self.current_trial = self._new_trial_locked()
+        self.results_path = self.run_dir / "results.jsonl"
+        self.session_path = self.run_dir / "session.json"
+
+        self.class_saved_counts: Dict[str, int] = {}
+        self.total_saved = 0
+        self.saved_bytes = 0
+
+        self._write_session_json()
+
+    def _scan_items(self) -> List[Item]:
+        items: List[Item] = []
+        for class_dir in sorted(self.dataset_root.iterdir()):
+            if not class_dir.is_dir() or class_dir.name.startswith("."):
                 continue
-            for p in sorted(class_dir.iterdir()):
-                if p.is_file() and p.suffix.lower() in IMG_EXTS and not p.name.startswith('.'):
-                    items.append(TrialItem(label=class_dir.name, image_path=p))
+            label = class_dir.name
+            for path in sorted(class_dir.iterdir()):
+                if not path.is_file() or path.suffix.lower() not in IMG_EXTS:
+                    continue
+                items.append(
+                    Item(
+                        label=label,
+                        path=str(path.resolve()),
+                        relpath=str(path.resolve().relative_to(self.dataset_root)),
+                        name=path.name,
+                    )
+                )
         return items
 
-    def _make_trial_id(self) -> str:
-        return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    def _new_trial_locked(self) -> CurrentTrial:
+        item = self.items[self.current_index]
+        return CurrentTrial(
+            session=self.session,
+            trial_id=f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
+            label=item.label,
+            relpath=item.relpath,
+            image_name=item.name,
+            item_index=self.current_index,
+            mode=self.mode,
+        )
 
-    def _write_session_info(self) -> None:
-        info = {
-            'session': self.session,
-            'mode': self.mode,
-            'dataset_root': str(self.dataset_root),
-            'output_root': str(self.output_root),
-            'sessions_root': str(self.sessions_root),
-            'workspaces_root': str(self.workspaces_root),
-            'run_dir': str(self.run_dir),
-            'workspace_dir': str(self.workspace_dir),
-            'low_conf_threshold': self.low_conf_threshold,
-            'max_saved_per_class': self.max_saved_per_class,
-            'max_saved_total': self.max_saved_total,
-            'disk_cap_mb': self.max_saved_bytes / (1024 * 1024) if self.max_saved_bytes else 0,
-            'retrain_threshold': self.retrain_threshold,
-            'auto_run_retrain_cmd': self.auto_run_retrain_cmd,
-            'save_wrong_only': self.save_wrong_only,
-            'items': len(self.items),
+    def _write_session_json(self) -> None:
+        payload = {
+            "session": self.session,
+            "mode": self.mode,
+            "dataset_root": str(self.dataset_root),
+            "output_root": str(self.output_root),
+            "run_dir": str(self.run_dir),
+            "workspace_dir": str(self.workspace_dir),
+            "items": len(self.items),
+            "stimulus": {
+                "image_w": STIM_IMAGE_W,
+                "image_h": STIM_IMAGE_H,
+                "red_w": STIM_RED_W,
+                "red_h": STIM_RED_H,
+                "gap_h": STIM_GAP_H,
+            },
+            "calibrate_tag": {
+                "family": APRILTAG_FAMILY,
+                "id": APRILTAG_ID,
+            },
+            "created_at": datetime.now().isoformat(),
         }
-        self.session_info_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding='utf-8')
+        self.session_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def current_item(self) -> TrialItem:
-        return self.items[self.index]
+    def get_current_item_locked(self) -> Item:
+        return self.items[self.current_index]
 
     def current_payload(self) -> dict:
-        item = self.current_item()
-        return {
-            'ok': True,
-            'active': True,
-            'session': self.session,
-            'mode': self.mode,
-            'trial_id': self.trial_id,
-            'label': item.label,
-            'image_name': item.image_path.name,
-            'image_url': '/img',
-            'version': self.version,
-            'retrain_requested': self.retrain_requested,
-            'retrain_running': self.retrain_running,
-        }
-
-    def advance(self, mode: str = 'next') -> dict:
         with self.lock:
-            if mode == 'random':
-                self.index = self.rng.randrange(len(self.items))
-            else:
-                self.index = (self.index + 1) % len(self.items)
-            self.version += 1
-            self.trial_id = self._make_trial_id()
+            t = self.current_trial
+            return {
+                "ok": True,
+                "active": True,
+                "session": t.session,
+                "mode": t.mode,
+                "trial_id": t.trial_id,
+                "label": t.label,
+                "image_name": t.image_name,
+                "image_url": "/img",
+                "version": t.item_index,
+                "item_index": t.item_index,
+                "relpath": t.relpath,
+            }
+
+    def advance(self, mode: str = "next") -> dict:
+        with self.lock:
+            self.current_index = (self.current_index + 1) % len(self.items)
+            self.current_trial = self._new_trial_locked()
             return self.current_payload()
 
-    def _save_image_if_allowed(self, payload: dict, bucket_dir: Path) -> str:
-        expected = payload.get('expected_label') or 'unknown'
-        if self.max_saved_total > 0 and self.saved_total >= self.max_saved_total:
-            payload['save_skip_reason'] = 'max_saved_total'
-            return ''
-        if self.max_saved_per_class > 0 and self.saved_per_class.get(expected, 0) >= self.max_saved_per_class:
-            payload['save_skip_reason'] = 'max_saved_per_class'
-            return ''
-        roi_jpg_b64 = payload.get('roi_jpg_b64') or ''
-        if not roi_jpg_b64:
-            payload['save_skip_reason'] = 'no_roi'
-            return ''
-        img_bytes = base64.b64decode(roi_jpg_b64)
-        if self.max_saved_bytes > 0 and self.saved_bytes + len(img_bytes) > self.max_saved_bytes:
-            payload['save_skip_reason'] = 'disk_cap'
-            return ''
-        bucket_dir.mkdir(parents=True, exist_ok=True)
-        confidence = float(payload.get('confidence', 0.0) or 0.0)
-        fname = f"{payload.get('trial_id','trial')}__pred_{payload.get('predicted_label','none')}__{confidence:.3f}.jpg"
-        out_path = bucket_dir / fname
-        out_path.write_bytes(img_bytes)
-        self.saved_total += 1
-        self.saved_bytes += len(img_bytes)
-        self.saved_per_class[expected] = self.saved_per_class.get(expected, 0) + 1
-        return str(out_path)
-
-    def _maybe_launch_retrain(self) -> None:
-        if self.mode != 'collect_retrain':
-            return
-        if self.retrain_threshold <= 0 or self.saved_total < self.retrain_threshold:
-            return
-        if self.retrain_requested or self.retrain_running:
-            return
-        self.retrain_requested = True
-        if not self.auto_run_retrain_cmd:
-            self.last_retrain_status = 'threshold_reached_waiting_manual'
-            return
-
-        def worker() -> None:
-            self.retrain_running = True
-            self.last_retrain_status = 'running'
-            cmd = self.auto_run_retrain_cmd.format(
-                run_dir=str(self.run_dir),
-                workspace_dir=str(self.workspace_dir),
-                session=self.session,
-                output_root=str(self.output_root),
-                sessions_root=str(self.sessions_root),
-                workspaces_root=str(self.workspaces_root),
-            )
-            try:
-                rc = subprocess.call(cmd, shell=True)
-                self.last_retrain_status = f'finished_rc_{rc}'
-            except Exception as e:
-                self.last_retrain_status = f'error:{e}'
-            finally:
-                self.retrain_running = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def save_result(self, payload: dict) -> dict:
+    def current_stimulus_png(self) -> bytes:
         with self.lock:
-            payload = dict(payload)
-            payload['server_time'] = time.time()
-            payload['session'] = payload.get('session') or self.session
-            payload['server_mode'] = self.mode
-            expected = payload.get('expected_label') or 'unknown'
-            match = bool(payload.get('match', False))
-            confidence = float(payload.get('confidence', 0.0) or 0.0)
-            saved_path = ''
-            if self.mode == 'collect_retrain':
-                should_save = (not match) or (confidence < self.low_conf_threshold and not self.save_wrong_only)
-                if should_save:
-                    bucket_dir = (self.lowconf_dir / expected) if match else (self.hard_dir / expected)
-                    saved_path = self._save_image_if_allowed(payload, bucket_dir)
-            payload['saved_roi_path'] = saved_path
-            with self.results_path.open('a', encoding='utf-8') as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + '\n')
-            self.current_result = payload
-            self._maybe_launch_retrain()
-            if self.auto_advance:
-                self.index = (self.index + 1) % len(self.items)
-                self.version += 1
-                self.trial_id = self._make_trial_id()
-            return {'ok': True, 'saved_roi_path': saved_path, 'next': self.current_payload(), 'saved_total': self.saved_total, 'retrain_requested': self.retrain_requested, 'retrain_running': self.retrain_running}
+            return build_demo_stimulus(Path(self.get_current_item_locked().path))
+
+    def append_result(self, payload: dict) -> Tuple[bool, Optional[str], str]:
+        with self.lock:
+            current_item = self.get_current_item_locked()
+            payload["server_time"] = time.time()
+            payload["server_session"] = self.session
+            payload["item_index"] = self.current_index
+            payload["current_relpath"] = current_item.relpath
+            payload["current_label"] = current_item.label
+
+            save_reason = ""
+            save_path: Optional[str] = None
+
+            if self.mode == "collect_retrain":
+                roi_b64 = payload.get("roi_jpg_b64") or ""
+                expected = str(payload.get("expected_label", current_item.label))
+                predicted = str(payload.get("predicted_label", ""))
+                confidence = float(payload.get("confidence", 0.0) or 0.0)
+                match = bool(payload.get("match", False))
+
+                should_save = False
+                if roi_b64:
+                    if not match:
+                        should_save = True
+                        save_reason = "wrong"
+                    elif confidence < LOW_CONF_THRESHOLD:
+                        should_save = True
+                        save_reason = "low_conf"
+
+                if should_save and self._can_save_locked(expected):
+                    try:
+                        save_path = self._save_roi_locked(
+                            expected=expected,
+                            predicted=predicted,
+                            confidence=confidence,
+                            trial_id=str(payload.get("trial_id", self.current_trial.trial_id)),
+                            source_name=current_item.name,
+                            roi_b64=roi_b64,
+                            bucket="hard_examples" if save_reason == "wrong" else "low_confidence",
+                        )
+                        payload["saved_roi_path"] = save_path
+                        payload["save_reason"] = save_reason
+                    except Exception as e:
+                        payload["save_error"] = str(e)
+
+            with self.results_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+            if AUTO_ADVANCE:
+                self.current_index = (self.current_index + 1) % len(self.items)
+                self.current_trial = self._new_trial_locked()
+
+            return True, save_path, save_reason
+
+    def _disk_usage_mb_locked(self) -> float:
+        total = 0
+        for root, _, files in os.walk(self.run_dir):
+            for name in files:
+                try:
+                    total += (Path(root) / name).stat().st_size
+                except OSError:
+                    pass
+        return total / (1024.0 * 1024.0)
+
+    def _can_save_locked(self, label: str) -> bool:
+        if self.total_saved >= MAX_SAVED_TOTAL:
+            return False
+        if self.class_saved_counts.get(label, 0) >= MAX_SAVED_PER_CLASS:
+            return False
+        if self._disk_usage_mb_locked() >= float(DISK_CAP_MB):
+            return False
+        return True
+
+    def _save_roi_locked(
+        self,
+        expected: str,
+        predicted: str,
+        confidence: float,
+        trial_id: str,
+        source_name: str,
+        roi_b64: str,
+        bucket: str,
+    ) -> str:
+        data = base64.b64decode(roi_b64.encode("ascii"))
+        label_dir = self.run_dir / bucket / safe_name(expected)
+        label_dir.mkdir(parents=True, exist_ok=True)
+        src_stem = Path(source_name).stem
+        fname = (
+            f"{safe_name(trial_id)}"
+            f"__src_{safe_name(src_stem)}"
+            f"__exp_{safe_name(expected)}"
+            f"__pred_{safe_name(predicted)}"
+            f"__{confidence:.4f}.jpg"
+        )
+        out_path = label_dir / fname
+        out_path.write_bytes(data)
+        self.total_saved += 1
+        self.saved_bytes += len(data)
+        self.class_saved_counts[expected] = self.class_saved_counts.get(expected, 0) + 1
+        return str(out_path)
 
     def status(self) -> dict:
         return {
-            'ok': True,
-            'session': self.session,
-            'mode': self.mode,
-            'items': len(self.items),
-            'saved_total': self.saved_total,
-            'saved_per_class': self.saved_per_class,
-            'saved_bytes': self.saved_bytes,
-            'retrain_requested': self.retrain_requested,
-            'retrain_running': self.retrain_running,
-            'last_retrain_status': self.last_retrain_status,
-            'output_root': str(self.output_root),
-            'run_dir': str(self.run_dir),
-            'workspace_dir': str(self.workspace_dir),
-            'current': self.current_payload(),
+            "ok": True,
+            "session": self.session,
+            "mode": self.mode,
+            "items": len(self.items),
+            "saved_total": self.total_saved,
+            "saved_per_class": self.class_saved_counts,
+            "saved_bytes": self.saved_bytes,
+            "output_root": str(self.output_root),
+            "run_dir": str(self.run_dir),
+            "workspace_dir": str(self.workspace_dir),
+            "current": self.current_payload(),
         }
 
 
-def make_handler(state: ControllerState):
-    class Handler(BaseHTTPRequestHandler):
-        def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
-            self.send_response(code)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(data)))
-            self.send_header('Cache-Control', 'no-store')
-            self.end_headers()
-            self.wfile.write(data)
+class App:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.host = "0.0.0.0"
+        self.port = args.port
+        self.state = SessionState(
+            dataset_root=Path(args.dataset_root),
+            output_root=Path(args.output_root),
+            mode=args.mode,
+        )
 
-        def _send_json(self, obj: dict, code: int = 200) -> None:
-            self._send_bytes(code, json.dumps(obj, ensure_ascii=False).encode('utf-8'), 'application/json')
+    def make_handler(self):
+        app = self
 
-        def _read_json(self) -> dict:
-            n = int(self.headers.get('Content-Length', '0'))
-            raw = self.rfile.read(n) if n > 0 else b'{}'
-            return json.loads(raw.decode('utf-8'))
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "vision_app_controller/4.0"
 
-        def log_message(self, format: str, *args):
-            return
+            def log_message(self, fmt: str, *args) -> None:
+                return
 
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            path = parsed.path
-            if path == '/api/current':
-                with state.lock:
-                    self._send_json(state.current_payload())
-                return
-            if path == '/api/status':
-                with state.lock:
-                    self._send_json(state.status())
-                return
-            if path == '/api/next':
-                mode = parse_qs(parsed.query).get('mode', ['next'])[0]
-                self._send_json(state.advance(mode=mode))
-                return
-            if path == '/img':
-                with state.lock:
-                    img_path = state.current_item().image_path
-                ctype = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.bmp': 'image/bmp', '.webp': 'image/webp'}.get(img_path.suffix.lower(), 'application/octet-stream')
-                self._send_bytes(200, img_path.read_bytes(), ctype)
-                return
-            if path == '/api/last_result':
-                with state.lock:
-                    self._send_json(state.current_result or {'ok': False})
-                return
-            if path == '/display':
-                html = f"""<!doctype html>
-<html><head><meta name='viewport' content='width=device-width, initial-scale=1' />
-<style>
-html,body{{margin:0;background:#111;color:#fff;font-family:sans-serif;height:100%;}}
-#wrap{{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px;}}
-img{{max-width:98vw;max-height:88vh;object-fit:contain;}}
-#meta{{font-size:18px;text-align:center;padding:0 12px;}}
-</style></head><body><div id='wrap'><img id='img' src='/img'><div id='meta'>loading…</div></div>
-<script>
-let lastTrial='';
-async function tick(){{
-  const r = await fetch('/api/current', {{cache:'no-store'}});
-  const j = await r.json();
-  document.getElementById('meta').textContent = `${{j.mode}} | ${{j.label}} | ${{j.image_name}} | ${{j.trial_id}}`;
-  if (j.trial_id !== lastTrial) {{
-    document.getElementById('img').src = '/img?t=' + encodeURIComponent(j.trial_id);
-    lastTrial = j.trial_id;
-  }}
-}}
-setInterval(tick, 300); tick();
-</script></body></html>"""
-                self._send_bytes(200, html.encode('utf-8'), 'text/html; charset=utf-8')
-                return
-            if path == '/':
-                status = state.status()
-                html = f"""<!doctype html><html><body>
-<h2>Stimulus controller</h2>
-<p>session: {state.session}</p>
-<p>mode: {state.mode}</p>
-<p>run_dir: {state.run_dir}</p>
-<ul>
-<li><a href='/display'>/display</a> — open this on iPad</li>
-<li><a href='/api/current'>/api/current</a></li>
-<li><a href='/api/status'>/api/status</a></li>
-<li><a href='/api/next'>/api/next</a></li>
-<li><a href='/api/next?mode=random'>/api/next?mode=random</a></li>
-<li><a href='/api/last_result'>/api/last_result</a></li>
-</ul>
-<pre>{json.dumps(status, indent=2, ensure_ascii=False)}</pre>
-</body></html>"""
-                self._send_bytes(200, html.encode('utf-8'), 'text/html; charset=utf-8')
-                return
-            self._send_json({'ok': False, 'error': 'not found'}, code=404)
+            def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
 
-        def do_POST(self):
-            parsed = urlparse(self.path)
-            if parsed.path == '/api/result':
-                payload = self._read_json()
-                self._send_json(state.save_result(payload), code=201)
-                return
-            if parsed.path == '/api/next':
-                payload = self._read_json() if self.headers.get('Content-Length') else {}
-                mode = payload.get('mode', 'next')
-                self._send_json(state.advance(mode=mode))
-                return
-            if parsed.path == '/api/retrain':
-                with state.lock:
-                    state.retrain_requested = True
-                    state._maybe_launch_retrain()
-                    self._send_json({'ok': True, 'retrain_requested': state.retrain_requested, 'retrain_running': state.retrain_running, 'last_retrain_status': state.last_retrain_status})
-                return
-            self._send_json({'ok': False, 'error': 'not found'}, code=404)
+            def _send_json(self, obj: dict, code: int = 200) -> None:
+                self._send_bytes(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
-    return Handler
+            def _read_json(self) -> dict:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                return json.loads(raw.decode("utf-8"))
+
+            def do_GET(self) -> None:
+                path = urlparse(self.path).path
+                if path in ("/", "/display"):
+                    self._send_bytes(200, display_html(), "text/html; charset=utf-8")
+                    return
+                if path == "/calibrate_tag":
+                    self._send_bytes(200, tag_html(), "text/html; charset=utf-8")
+                    return
+                if path == "/img":
+                    self._send_bytes(200, app.state.current_stimulus_png(), "image/png")
+                    return
+                if path == "/tag":
+                    self._send_bytes(200, build_tag_stimulus(), "image/png")
+                    return
+                if path == "/health":
+                    self._send_json({"ok": True})
+                    return
+                if path == "/api/current":
+                    self._send_json(app.state.current_payload())
+                    return
+                if path == "/api/next":
+                    self._send_json(app.state.advance())
+                    return
+                if path == "/api/status":
+                    self._send_json(app.state.status())
+                    return
+                self._send_json({"ok": False, "error": "not found"}, code=404)
+
+            def do_POST(self) -> None:
+                path = urlparse(self.path).path
+                if path != "/api/result":
+                    self._send_json({"ok": False, "error": "not found"}, code=404)
+                    return
+                try:
+                    payload = self._read_json()
+                except Exception as e:
+                    self._send_json({"ok": False, "error": f"bad json: {e}"}, code=400)
+                    return
+                ok, save_path, save_reason = app.state.append_result(payload)
+                self._send_json(
+                    {
+                        "ok": ok,
+                        "saved_roi_path": save_path,
+                        "save_reason": save_reason,
+                        "next": app.state.current_payload(),
+                    }
+                )
+
+        return Handler
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Minimal laptop server: serve demo stimulus, serve AprilTag stimulus, collect Pi results."
+    )
+    p.add_argument("--dataset-root", required=True, help="Read-only source image root: one class folder per label")
+    p.add_argument("--output-root", required=True, help="Writable root. Creates sessions/ and workspaces/ here")
+    p.add_argument("--mode", default="demo", choices=["demo", "collect_retrain"], help="demo=log only, collect_retrain=save hard examples")
+    p.add_argument("--port", type=int, default=8787, help="HTTP port")
+    return p.parse_args()
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='Laptop controller server for iPad display + Pi result collection.')
-    ap.add_argument('--dataset-root', required=True, help='Folder with class subfolders of images displayed on the iPad')
-    ap.add_argument('--output-root', default='runs/controller', help='Writable root. Server creates sessions/ and workspaces/ under this folder')
-    ap.add_argument('--workspace-root', default='', help='Optional override for training workspaces root; default is <output-root>/workspaces')
-    ap.add_argument('--mode', choices=['demo', 'collect_retrain'], default='demo')
-    ap.add_argument('--host', default='0.0.0.0')
-    ap.add_argument('--port', type=int, default=8787)
-    ap.add_argument('--seed', type=int, default=42)
-    ap.add_argument('--no-auto-advance', action='store_true')
-    ap.add_argument('--low-conf-threshold', type=float, default=0.65)
-    ap.add_argument('--save-wrong-only', action='store_true', help='In collect_retrain, save only wrong predictions and skip low-confidence correct samples')
-    ap.add_argument('--max-saved-per-class', type=int, default=200)
-    ap.add_argument('--max-saved-total', type=int, default=3000)
-    ap.add_argument('--disk-cap-mb', type=int, default=2048)
-    ap.add_argument('--retrain-threshold', type=int, default=300, help='When saved_total reaches this, mark retrain_requested (and optionally launch a command)')
-    ap.add_argument('--auto-run-retrain-cmd', default='', help='Optional shell command launched once when retrain threshold is reached; may use {run_dir} and {session}')
-    args = ap.parse_args()
+    args = parse_args()
+    app = App(args)
+    server = ThreadingHTTPServer((app.host, app.port), app.make_handler())
 
-    workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
-    state = ControllerState(
-        dataset_root=Path(args.dataset_root).resolve(),
-        output_root=Path(args.output_root).resolve(),
-        workspace_root=workspace_root,
-        mode=args.mode,
-        auto_advance=not args.no_auto_advance,
-        seed=args.seed,
-        low_conf_threshold=args.low_conf_threshold,
-        max_saved_per_class=args.max_saved_per_class,
-        max_saved_total=args.max_saved_total,
-        disk_cap_mb=args.disk_cap_mb,
-        retrain_threshold=args.retrain_threshold,
-        auto_run_retrain_cmd=args.auto_run_retrain_cmd,
-        save_wrong_only=args.save_wrong_only,
-    )
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
-    print(f'controller ready: http://{args.host}:{args.port}/')
-    print(f'iPad open:        http://<laptop-ip>:{args.port}/display')
-    print(f'session:          {state.session}')
-    print(f'mode:             {state.mode}')
-    print(f'dataset items:    {len(state.items)}')
-    print(f'output root:      {state.output_root}')
-    print(f'run dir:          {state.run_dir}')
-    print(f'workspace dir:    {state.workspace_dir}')
+    print(f"controller ready: http://{app.host}:{app.port}/")
+    print(f"iPad demo page:   http://<laptop-ip>:{app.port}/display")
+    print(f"iPad tag page:    http://<laptop-ip>:{app.port}/calibrate_tag")
+    print(f"session:          {app.state.session}")
+    print(f"mode:             {app.state.mode}")
+    print(f"dataset items:    {len(app.state.items)}")
+    print(f"run dir:          {app.state.run_dir}")
+    print(f"workspace dir:    {app.state.workspace_dir}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("\nbye")
     finally:
         server.server_close()
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

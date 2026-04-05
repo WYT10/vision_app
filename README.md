@@ -12,16 +12,19 @@ A cleaned vision stack with a **Pi NCNN-only runtime** and a **laptop-side Pytho
 - optional automation client inside `deploy`
 
 ### Laptop tools (Python)
-- `controller_server.py`: truth controller + iPad display + result collection
-- `prepare_cls_dataset.py`: synthetic dataset generation
-- `merge_hard_examples.py`: merge collected camera ROI samples into the train split
-- `eval_export_cls.py`: train from `.pt`, then export **ONNX + NCNN**
-- `run_retrain_pipeline.py`: one-shot synthetic + merge + multi-size train/export
+- `laptop_tools/controller_server.py`: truth controller + iPad display + result collection
+- `training_tools/prepare_cls_dataset.py`: synthetic dataset generation
+- `training_tools/merge_hard_examples.py`: merge collected camera ROI samples into the train split
+- `training_tools/eval_export_cls.py`: train from `.pt`, then export **ONNX + NCNN**
+- `training_tools/run_retrain_pipeline.py`: one-shot synthetic + merge + multi-size train/export
 
 The Pi build and runtime do **not** require ONNX Runtime.
 The laptop training/export pipeline still supports `.pt -> onnx -> ncnn`.
 
 ## Project layout
+
+Each Python tool exists in exactly one place in this bundle. There are no root-level duplicate wrappers.
+
 
 ```text
 vision_app/
@@ -155,7 +158,7 @@ http://<laptop-ip>:8787/display
 ### 1) Tune synthetic augmentation (optional)
 
 ```bash
-python3 live_tune_aug.py
+python3 training_tools/live_tune_aug.py
 ```
 
 This exports `aug_config.json` for **synthetic dataset generation only**.
