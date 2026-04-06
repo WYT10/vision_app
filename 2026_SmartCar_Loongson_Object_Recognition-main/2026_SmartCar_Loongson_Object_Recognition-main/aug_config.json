@@ -1,0 +1,17 @@
+{
+    "note": "Auto-exported from Live Tuner",
+    "custom_sequence": true,
+    "sequence": [
+        {
+            "type": "sp",
+            "amount": 0.15,
+            "ratio": 0.83,
+            "seed": 63,
+            "dot_size": 24
+        },
+        {
+            "type": "mb",
+            "k": 35
+        }
+    ]
+}
