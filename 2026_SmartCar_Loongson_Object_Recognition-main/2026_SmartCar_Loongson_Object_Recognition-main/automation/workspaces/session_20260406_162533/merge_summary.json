@@ -1,0 +1,10 @@
+{
+  "base_dataset": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\generated_datasets\\dataset_cls__v3__dt20260406_193829__px40__tr5__va5__te5__seed42",
+  "session_dir": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\automation\\sessions\\session_20260406_162533",
+  "output_dataset": "C:\\Users\\wongy\\Downloads\\vision_app\\2026_SmartCar_Loongson_Object_Recognition-main\\2026_SmartCar_Loongson_Object_Recognition-main\\automation\\workspaces\\session_20260406_162533",
+  "base_target_size": 40,
+  "hard_examples_added": 1042,
+  "low_confidence_added": 443,
+  "skipped_unknown_class": 18,
+  "skipped_non_image": 0
+}
