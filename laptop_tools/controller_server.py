@@ -6,10 +6,11 @@ import base64
 import io
 import json
 import os
+import re
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +23,7 @@ try:
     import cv2  # type: ignore
 except Exception:
     cv2 = None
+
 
 # ---------- stimulus format ----------
 STIM_IMAGE_W = 240
@@ -44,6 +46,41 @@ DISK_CAP_MB = 2048
 AUTO_ADVANCE = True
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+API_VERSION = 2
+
+# Built-in bilingual label aliases. These are canonicalized to the English model-side names.
+DEFAULT_LABEL_ALIASES: Dict[str, str] = {
+    "A-枪支": "A_gun",
+    "A_gun": "A_gun",
+    "B-爆炸物": "B_explosive",
+    "B_explosive": "B_explosive",
+    "C-匕首": "C_dagger",
+    "C_dagger": "C_dagger",
+    "D-警棍": "D_baton",
+    "D_baton": "D_baton",
+    "E-消防斧": "E_fire_axe",
+    "E_fire_axe": "E_fire_axe",
+    "F-急救包": "F_first_aid_kit",
+    "F_first_aid_kit": "F_first_aid_kit",
+    "G-手电筒": "G_flashlight",
+    "G_flashlight": "G_flashlight",
+    "H-对讲机": "H_walkie_talkie",
+    "H_walkie_talkie": "H_walkie_talkie",
+    "I-防弹背心": "I_body_armor",
+    "I_body_armor": "I_body_armor",
+    "J-望远镜": "J_binoculars",
+    "J_binoculars": "J_binoculars",
+    "K-头盔": "K_helmet",
+    "K_helmet": "K_helmet",
+    "L-消防车": "L_fire_truck",
+    "L_fire_truck": "L_fire_truck",
+    "M-救护车": "M_ambulance",
+    "M_ambulance": "M_ambulance",
+    "N-装甲车": "N_armored_vehicle",
+    "N_armored_vehicle": "N_armored_vehicle",
+    "O-摩托车": "O_motorcycle",
+    "O_motorcycle": "O_motorcycle",
+}
 
 
 @dataclass
@@ -156,7 +193,7 @@ def display_html() -> bytes:
 html,body{margin:0;padding:0;background:#fff;width:100%;height:100%;overflow:hidden}
 body{display:flex;align-items:center;justify-content:center}
 img{max-width:95vw;max-height:95vh;object-fit:contain}
-.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555}
+.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555;background:rgba(255,255,255,.8);padding:4px 6px;border-radius:6px}
 </style>
 </head>
 <body>
@@ -168,7 +205,7 @@ async function refreshMeta(){
     const r = await fetch('/api/current?t=' + Date.now(), {cache:'no-store'});
     const j = await r.json();
     document.getElementById('info').textContent =
-      'trial=' + j.trial_id + ' label=' + j.label + ' mode=' + j.mode;
+      'trial=' + j.trial_id + ' label=' + j.label + ' active=' + j.active;
   }catch(e){
     document.getElementById('info').textContent = 'server not ready';
   }
@@ -195,7 +232,7 @@ def tag_html() -> bytes:
 html,body{margin:0;padding:0;background:#fff;width:100%;height:100%;overflow:hidden}
 body{display:flex;align-items:center;justify-content:center}
 img{max-width:95vw;max-height:95vh;object-fit:contain}
-.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555}
+.info{position:fixed;left:8px;bottom:8px;font-family:sans-serif;font-size:12px;color:#555;background:rgba(255,255,255,.8);padding:4px 6px;border-radius:6px}
 </style>
 </head>
 <body>
@@ -209,6 +246,52 @@ refreshImg();
 </body>
 </html>"""
     return html.encode("utf-8")
+
+
+class LabelNormalizer:
+    def __init__(self, dataset_root: Path, output_root: Path) -> None:
+        self.dataset_root = dataset_root
+        self.output_root = output_root
+        self.aliases = self._load_aliases()
+
+    def _load_aliases(self) -> Dict[str, str]:
+        merged: Dict[str, str] = dict(DEFAULT_LABEL_ALIASES)
+        candidates = [
+            self.output_root / "label_aliases.json",
+            self.dataset_root / "label_aliases.json",
+        ]
+        for p in candidates:
+            if not p.exists():
+                continue
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        merged[str(k)] = str(v)
+            except Exception:
+                pass
+        return merged
+
+    def canonical(self, label: str) -> str:
+        s = (label or "").strip()
+        if s in self.aliases:
+            return self.aliases[s].strip().lower()
+
+        s2 = s.replace(" ", "_").replace("-", "_").strip("_")
+        if s2 in self.aliases:
+            return self.aliases[s2].strip().lower()
+
+        # Fallback heuristic: compare by class prefix if no exact alias exists.
+        m = re.match(r"^([A-Za-z][A-Za-z0-9]*)[-_\s].*$", s)
+        if m:
+            return m.group(1).lower()
+
+        return s2.lower()
+
+    def compare(self, expected: str, predicted: str) -> Tuple[bool, str, str]:
+        e = self.canonical(expected)
+        p = self.canonical(predicted)
+        return (e == p), e, p
 
 
 class SessionState:
@@ -228,6 +311,7 @@ class SessionState:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
+        self.label_normalizer = LabelNormalizer(self.dataset_root, self.output_root)
         self.items = self._scan_items()
         if not self.items:
             raise RuntimeError(f"No images found under dataset root: {self.dataset_root}")
@@ -240,7 +324,7 @@ class SessionState:
 
         self.class_saved_counts: Dict[str, int] = {}
         self.total_saved = 0
-        self.saved_bytes = 0
+        self.last_post_summary = "idle"
 
         self._write_session_json()
 
@@ -295,6 +379,9 @@ class SessionState:
                 "family": APRILTAG_FAMILY,
                 "id": APRILTAG_ID,
             },
+            "label_aliases_path_output": str(self.output_root / "label_aliases.json"),
+            "label_aliases_path_dataset": str(self.dataset_root / "label_aliases.json"),
+            "built_in_aliases_count": len(DEFAULT_LABEL_ALIASES),
             "created_at": datetime.now().isoformat(),
         }
         self.session_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -302,28 +389,30 @@ class SessionState:
     def get_current_item_locked(self) -> Item:
         return self.items[self.current_index]
 
+    def current_trial_payload(self) -> dict:
+        t = self.current_trial
+        return {
+            "ok": True,
+            "active": True,
+            "session": t.session,
+            "trial_id": t.trial_id,
+            "label": t.label,
+            "image_name": t.image_name,
+            "image_url": "/img",
+            "version": API_VERSION,
+            "item_index": t.item_index,
+            "mode": t.mode,
+        }
+
     def current_payload(self) -> dict:
         with self.lock:
-            t = self.current_trial
-            return {
-                "ok": True,
-                "active": True,
-                "session": t.session,
-                "mode": t.mode,
-                "trial_id": t.trial_id,
-                "label": t.label,
-                "image_name": t.image_name,
-                "image_url": "/img",
-                "version": t.item_index,
-                "item_index": t.item_index,
-                "relpath": t.relpath,
-            }
+            return self.current_trial_payload()
 
-    def advance(self, mode: str = "next") -> dict:
+    def advance(self) -> dict:
         with self.lock:
             self.current_index = (self.current_index + 1) % len(self.items)
             self.current_trial = self._new_trial_locked()
-            return self.current_payload()
+            return self.current_trial_payload()
 
     def current_stimulus_png(self) -> bytes:
         with self.lock:
@@ -332,25 +421,30 @@ class SessionState:
     def append_result(self, payload: dict) -> Tuple[bool, Optional[str], str]:
         with self.lock:
             current_item = self.get_current_item_locked()
+            expected = str(payload.get("expected_label", current_item.label))
+            predicted = str(payload.get("predicted_label", ""))
+            normalized_match, expected_canonical, predicted_canonical = self.label_normalizer.compare(expected, predicted)
+
             payload["server_time"] = time.time()
             payload["server_session"] = self.session
             payload["item_index"] = self.current_index
             payload["current_relpath"] = current_item.relpath
             payload["current_label"] = current_item.label
+            payload["expected_canonical"] = expected_canonical
+            payload["predicted_canonical"] = predicted_canonical
+            payload["match_raw_client"] = bool(payload.get("match", False))
+            payload["match"] = normalized_match
 
             save_reason = ""
             save_path: Optional[str] = None
 
             if self.mode == "collect_retrain":
                 roi_b64 = payload.get("roi_jpg_b64") or ""
-                expected = str(payload.get("expected_label", current_item.label))
-                predicted = str(payload.get("predicted_label", ""))
-                confidence = float(payload.get("confidence", 0.0) or 0.0)
-                match = bool(payload.get("match", False))
+                confidence = float(payload.get("confidence", 0.0))
 
                 should_save = False
                 if roi_b64:
-                    if not match:
+                    if not normalized_match:
                         should_save = True
                         save_reason = "wrong"
                     elif confidence < LOW_CONF_THRESHOLD:
@@ -375,6 +469,12 @@ class SessionState:
 
             with self.results_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+            self.last_post_summary = (
+                f"trial={payload.get('trial_id','')} expected={expected} "
+                f"pred={predicted} canonical=({expected_canonical},{predicted_canonical}) "
+                f"match={normalized_match} save={save_reason or 'none'}"
+            )
 
             if AUTO_ADVANCE:
                 self.current_index = (self.current_index + 1) % len(self.items)
@@ -425,24 +525,23 @@ class SessionState:
         out_path = label_dir / fname
         out_path.write_bytes(data)
         self.total_saved += 1
-        self.saved_bytes += len(data)
         self.class_saved_counts[expected] = self.class_saved_counts.get(expected, 0) + 1
         return str(out_path)
 
-    def status(self) -> dict:
-        return {
-            "ok": True,
-            "session": self.session,
-            "mode": self.mode,
-            "items": len(self.items),
-            "saved_total": self.total_saved,
-            "saved_per_class": self.class_saved_counts,
-            "saved_bytes": self.saved_bytes,
-            "output_root": str(self.output_root),
-            "run_dir": str(self.run_dir),
-            "workspace_dir": str(self.workspace_dir),
-            "current": self.current_payload(),
-        }
+    def status_payload(self) -> dict:
+        with self.lock:
+            return {
+                "ok": True,
+                "session": self.session,
+                "mode": self.mode,
+                "current": self.current_trial_payload(),
+                "run_dir": str(self.run_dir),
+                "workspace_dir": str(self.workspace_dir),
+                "results_path": str(self.results_path),
+                "saved_total": self.total_saved,
+                "class_saved_counts": self.class_saved_counts,
+                "last_post_summary": self.last_post_summary,
+            }
 
 
 class App:
@@ -459,12 +558,12 @@ class App:
         app = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "vision_app_controller/4.0"
+            server_version = "vision_app_controller/5.0"
 
             def log_message(self, fmt: str, *args) -> None:
                 return
 
-            def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
+            def _send_bytes(self, code: int, content_type: str, data: bytes) -> None:
                 self.send_response(code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
@@ -473,7 +572,8 @@ class App:
                 self.wfile.write(data)
 
             def _send_json(self, obj: dict, code: int = 200) -> None:
-                self._send_bytes(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+                self._send_bytes(code, "application/json; charset=utf-8", data)
 
             def _read_json(self) -> dict:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -483,16 +583,16 @@ class App:
             def do_GET(self) -> None:
                 path = urlparse(self.path).path
                 if path in ("/", "/display"):
-                    self._send_bytes(200, display_html(), "text/html; charset=utf-8")
+                    self._send_bytes(200, "text/html; charset=utf-8", display_html())
                     return
                 if path == "/calibrate_tag":
-                    self._send_bytes(200, tag_html(), "text/html; charset=utf-8")
+                    self._send_bytes(200, "text/html; charset=utf-8", tag_html())
                     return
                 if path == "/img":
-                    self._send_bytes(200, app.state.current_stimulus_png(), "image/png")
+                    self._send_bytes(200, "image/png", app.state.current_stimulus_png())
                     return
                 if path == "/tag":
-                    self._send_bytes(200, build_tag_stimulus(), "image/png")
+                    self._send_bytes(200, "image/png", build_tag_stimulus())
                     return
                 if path == "/health":
                     self._send_json({"ok": True})
@@ -504,7 +604,7 @@ class App:
                     self._send_json(app.state.advance())
                     return
                 if path == "/api/status":
-                    self._send_json(app.state.status())
+                    self._send_json(app.state.status_payload())
                     return
                 self._send_json({"ok": False, "error": "not found"}, code=404)
 
@@ -550,6 +650,7 @@ def main() -> int:
     print(f"controller ready: http://{app.host}:{app.port}/")
     print(f"iPad demo page:   http://<laptop-ip>:{app.port}/display")
     print(f"iPad tag page:    http://<laptop-ip>:{app.port}/calibrate_tag")
+    print(f"status api:       http://<laptop-ip>:{app.port}/api/status")
     print(f"session:          {app.state.session}")
     print(f"mode:             {app.state.mode}")
     print(f"dataset items:    {len(app.state.items)}")
