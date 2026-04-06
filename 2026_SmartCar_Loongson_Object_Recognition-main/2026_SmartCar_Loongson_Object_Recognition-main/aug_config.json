@@ -3,15 +3,22 @@
     "custom_sequence": true,
     "sequence": [
         {
-            "type": "sp",
-            "amount": 0.15,
-            "ratio": 0.83,
-            "seed": 63,
-            "dot_size": 24
+            "type": "rs",
+            "size": 40
+        },
+        {
+            "type": "af",
+            "angle_limit": 20.0
+        },
+        {
+            "type": "gn",
+            "mean_limit": 0.05,
+            "var_min": 0.0025,
+            "var_max": 0.005
         },
         {
             "type": "mb",
-            "k": 35
+            "k": 3
         }
     ]
 }

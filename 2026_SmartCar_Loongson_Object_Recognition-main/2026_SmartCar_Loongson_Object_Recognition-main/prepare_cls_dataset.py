@@ -306,17 +306,24 @@ def apply_tuned_sequence(img_pil: Image.Image, rng: random.Random) -> Image.Imag
         elif op['type'] == 'rs':
             img = TF.resize(img, [op['size'], op['size']], interpolation=InterpolationMode.BILINEAR, antialias=True)
         elif op['type'] == 'af':
-            w, h = img.size
-            translate = [int(op['tx'] * w), int(op['ty'] * h)]
+            angle = rng.uniform(-op.get('angle_limit', 0.0), op.get('angle_limit', 0.0))
             img = TF.affine(
                 img,
-                angle=op['angle'],
-                translate=translate,
-                scale=op['scale'],
-                shear=[op['shear'], 0.0],
+                angle=angle,
+                translate=[0, 0],
+                scale=1.0,
+                shear=[0.0, 0.0],
                 interpolation=InterpolationMode.BILINEAR,
                 fill=0,
             )
+        elif op['type'] == 'gn':
+            mean = rng.uniform(-op.get('mean_limit', 0.0), op.get('mean_limit', 0.0))
+            var = rng.uniform(op.get('var_min', 0.0), op.get('var_max', 0.0))
+            img_np = np.array(img).astype(np.float32) / 255.0
+            std = np.sqrt(max(var, 0.0))
+            noise = np.random.default_rng(rng.randint(0, 2**32-1)).normal(loc=mean, scale=std, size=img_np.shape)
+            noisy = np.clip(img_np + noise, 0.0, 1.0)
+            img = Image.fromarray((noisy * 255.0).astype(np.uint8))
     return img
 
 def augment_with_torchvision(base_pil: Image.Image, seed: int) -> Image.Image:

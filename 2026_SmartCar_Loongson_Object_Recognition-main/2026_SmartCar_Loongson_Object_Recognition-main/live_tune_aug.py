@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import cv2
 import numpy as np
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk
 from pathlib import Path
 import random
 import json
@@ -16,6 +16,7 @@ class AugmentationTuner:
         
         self.sequence = [] # List of dicts representing operations
         self.current_step = 0
+        self.refresh_counter = 0
         
         self.original_image_bgr = None
         self.rng = random.Random(42)
@@ -29,6 +30,7 @@ class AugmentationTuner:
         toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
         
         ttk.Button(toolbar, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Refresh Random", command=self.refresh_randomized).pack(side=tk.RIGHT, padx=5)
         ttk.Button(toolbar, text="Export to Dataset Config", command=self.export_config).pack(side=tk.RIGHT, padx=5)
         
         # Layout: Left for image, Right for sequence
@@ -59,7 +61,7 @@ class AugmentationTuner:
         # Buttons to add operations
         btn_frame = ttk.Frame(right_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(btn_frame, text="Add Salt-Pepper", command=lambda: self.add_op("sp")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Add Gaussian Noise", command=lambda: self.add_op("gn")).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Add Median Blur", command=lambda: self.add_op("mb")).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Add Resize", command=lambda: self.add_op("rs")).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Add Affine", command=lambda: self.add_op("af")).pack(side=tk.LEFT, padx=2)
@@ -91,16 +93,33 @@ class AugmentationTuner:
 
     def _load_default_image(self):
         # Try to find a random image from the img_dataset
+        images = self._collect_dataset_images()
+        if images:
+            selected = random.choice(images)
+            self.original_image_bgr = self._imread_unicode(selected)
+            if self.original_image_bgr is not None:
+                self.update_pipeline()
+
+    def _collect_dataset_images(self):
         ds_path = Path(__file__).resolve().parent / "img_dataset"
-        if ds_path.exists():
-            images = list(ds_path.rglob("*.jpg"))
-            if images:
-                self.original_image_bgr = self._imread_unicode(images[0])
-                if self.original_image_bgr is not None:
-                    self.update_pipeline()
+        if not ds_path.exists():
+            return []
+        exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp")
+        images = []
+        for ext in exts:
+            images.extend(ds_path.rglob(ext))
+        return images
 
     def load_image(self):
-        path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")])
+        images = self._collect_dataset_images()
+        if images:
+            selected = random.choice(images)
+            self.original_image_bgr = self._imread_unicode(selected)
+            if self.original_image_bgr is not None:
+                self.update_pipeline()
+                return
+
+        path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")])
         if path:
             self.original_image_bgr = self._imread_unicode(path)
             if self.original_image_bgr is not None:
@@ -125,15 +144,24 @@ class AugmentationTuner:
             }, f, indent=4)
         messagebox.showinfo("Saved", f"Configuration exported to:\n{path}\n\nThe next run of prepare_cls_dataset.py will automatically pick this up!")
 
+    def refresh_randomized(self):
+        self.refresh_counter += 1
+        self.update_pipeline()
+
     def add_op(self, op_type):
-        if op_type == "sp":
-            op = {"type": "sp", "amount": 0.05, "ratio": 0.5, "seed": 42, "dot_size": 2}
+        if op_type == "gn":
+            op = {
+                "type": "gn",
+                "mean_limit": 0.05,
+                "var_min": 0.0,
+                "var_max": 0.02,
+            }
         elif op_type == "mb":
             op = {"type": "mb", "k": 3}
         elif op_type == "rs":
             op = {"type": "rs", "size": 40}
         elif op_type == "af":
-            op = {"type": "af", "angle": 0.0, "tx": 0.0, "ty": 0.0, "scale": 1.0, "shear": 0.0}
+            op = {"type": "af", "angle_limit": 20.0}
             
         self.sequence.append(op)
         self.rebuild_op_ui()
@@ -151,6 +179,35 @@ class AugmentationTuner:
             self.rebuild_op_ui()
             self.update_pipeline()
 
+    def _op_label(self, op_type):
+        mapping = {
+            "gn": "Gaussian Noise",
+            "mb": "Median Blur",
+            "rs": "Resize",
+            "af": "Affine Transform",
+        }
+        return mapping.get(op_type, op_type)
+
+    def _add_slider_with_entry(self, parent, idx, param, label_text, from_, to_, value, is_int=False):
+        ttk.Label(parent, text=label_text).pack(side=tk.TOP, anchor=tk.W)
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.X)
+
+        var = tk.IntVar(value=int(value)) if is_int else tk.DoubleVar(value=float(value))
+        scale = ttk.Scale(
+            row,
+            from_=from_,
+            to=to_,
+            variable=var,
+            command=lambda v, i=idx, p=param, vref=var: self.on_param_change(i, p, v, vref),
+        )
+        scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        entry = ttk.Entry(row, width=10, textvariable=var)
+        entry.pack(side=tk.LEFT, padx=(6, 0))
+        entry.bind("<Return>", lambda e, i=idx, p=param, vref=var: self.on_param_change(i, p, vref.get(), vref))
+        entry.bind("<FocusOut>", lambda e, i=idx, p=param, vref=var: self.on_param_change(i, p, vref.get(), vref))
+
     def rebuild_op_ui(self):
         for widget in self.ops_frame.winfo_children():
             widget.destroy()
@@ -158,70 +215,79 @@ class AugmentationTuner:
         self.op_widgets = []
         
         for i, op in enumerate(self.sequence):
-            frame = ttk.LabelFrame(self.ops_frame, text=f"Step {i+1}: {'Salt-Pepper' if op['type']=='sp' else 'Median Blur'}")
+            frame = ttk.LabelFrame(self.ops_frame, text=f"Step {i+1}: {self._op_label(op['type'])}")
             frame.pack(fill=tk.X, padx=5, pady=5)
             
             ctrl_frame = ttk.Frame(frame)
             ctrl_frame.pack(fill=tk.X, padx=2, pady=2)
             
-            if op['type'] == 'sp':
-                ttk.Label(ctrl_frame, text="Amount (0.0..1.0):").pack(side=tk.TOP, anchor=tk.W)
-                amount_var = tk.DoubleVar(value=op['amount'])
-                s1 = ttk.Scale(ctrl_frame, from_=0.0, to=1.0, variable=amount_var, command=lambda v, idx=i: self.on_param_change(idx, 'amount', v))
-                s1.pack(fill=tk.X)
-                
-                ttk.Label(ctrl_frame, text="Ratio S/P (0.0..1.0):").pack(side=tk.TOP, anchor=tk.W)
-                ratio_var = tk.DoubleVar(value=op['ratio'])
-                s2 = ttk.Scale(ctrl_frame, from_=0.0, to=1.0, variable=ratio_var, command=lambda v, idx=i: self.on_param_change(idx, 'ratio', v))
-                s2.pack(fill=tk.X)
-                
-                ttk.Label(ctrl_frame, text="Seed (0..100):").pack(side=tk.TOP, anchor=tk.W)
-                seed_var = tk.IntVar(value=op.get('seed', 42))
-                s3 = ttk.Scale(ctrl_frame, from_=0, to=100, variable=seed_var, command=lambda v, idx=i: self.on_param_change(idx, 'seed', v))
-                s3.pack(fill=tk.X)
-                
-                ttk.Label(ctrl_frame, text="Dot Size (1..50):").pack(side=tk.TOP, anchor=tk.W)
-                dot_hz_var = tk.IntVar(value=op.get('dot_size', 2))
-                s4 = ttk.Scale(ctrl_frame, from_=1, to=50, variable=dot_hz_var, command=lambda v, idx=i: self.on_param_change(idx, 'dot_size', v))
-                s4.pack(fill=tk.X)
+            if op['type'] == 'gn':
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'mean_limit',
+                    "Mean Limit (0.0..0.5), sampled in [-limit,+limit]:",
+                    0.0,
+                    0.5,
+                    op['mean_limit'],
+                    is_int=False,
+                )
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'var_min',
+                    "Variance Min (0.0..0.5):",
+                    0.0,
+                    0.5,
+                    op['var_min'],
+                    is_int=False,
+                )
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'var_max',
+                    "Variance Max (0.0..0.05), sampled in [0,var_max]:",
+                    0.0,
+                    0.05,
+                    op['var_max'],
+                    is_int=False,
+                )
                 
             elif op['type'] == 'mb':
-                ttk.Label(ctrl_frame, text="Kernel Size (1..41):").pack(side=tk.TOP, anchor=tk.W)
-                k_var = tk.IntVar(value=op['k'])
-                s1 = ttk.Scale(ctrl_frame, from_=1, to=41, variable=k_var, command=lambda v, idx=i: self.on_param_change(idx, 'k', v))
-                s1.pack(fill=tk.X)
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'k',
+                    "Kernel Size (1..41):",
+                    1,
+                    41,
+                    op['k'],
+                    is_int=True,
+                )
                 
             elif op['type'] == 'rs':
-                ttk.Label(ctrl_frame, text="Size (10..200):").pack(side=tk.TOP, anchor=tk.W)
-                size_var = tk.IntVar(value=op['size'])
-                s1 = ttk.Scale(ctrl_frame, from_=10, to=200, variable=size_var, command=lambda v, idx=i: self.on_param_change(idx, 'size', v))
-                s1.pack(fill=tk.X)
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'size',
+                    "Size (10..200):",
+                    10,
+                    200,
+                    op['size'],
+                    is_int=True,
+                )
 
             elif op['type'] == 'af':
-                ttk.Label(ctrl_frame, text="Angle (-180..180):").pack(side=tk.TOP, anchor=tk.W)
-                a_var = tk.DoubleVar(value=op['angle'])
-                s1 = ttk.Scale(ctrl_frame, from_=-180.0, to=180.0, variable=a_var, command=lambda v, idx=i: self.on_param_change(idx, 'angle', v))
-                s1.pack(fill=tk.X)
-
-                ttk.Label(ctrl_frame, text="Translate X (-0.5..0.5):").pack(side=tk.TOP, anchor=tk.W)
-                tx_var = tk.DoubleVar(value=op['tx'])
-                s2 = ttk.Scale(ctrl_frame, from_=-0.5, to=0.5, variable=tx_var, command=lambda v, idx=i: self.on_param_change(idx, 'tx', v))
-                s2.pack(fill=tk.X)
-
-                ttk.Label(ctrl_frame, text="Translate Y (-0.5..0.5):").pack(side=tk.TOP, anchor=tk.W)
-                ty_var = tk.DoubleVar(value=op['ty'])
-                s3 = ttk.Scale(ctrl_frame, from_=-0.5, to=0.5, variable=ty_var, command=lambda v, idx=i: self.on_param_change(idx, 'ty', v))
-                s3.pack(fill=tk.X)
-
-                ttk.Label(ctrl_frame, text="Scale (0.5..2.0):").pack(side=tk.TOP, anchor=tk.W)
-                sc_var = tk.DoubleVar(value=op['scale'])
-                s4 = ttk.Scale(ctrl_frame, from_=0.5, to=2.0, variable=sc_var, command=lambda v, idx=i: self.on_param_change(idx, 'scale', v))
-                s4.pack(fill=tk.X)
-
-                ttk.Label(ctrl_frame, text="Shear (-90..90):").pack(side=tk.TOP, anchor=tk.W)
-                sh_var = tk.DoubleVar(value=op['shear'])
-                s5 = ttk.Scale(ctrl_frame, from_=-90.0, to=90.0, variable=sh_var, command=lambda v, idx=i: self.on_param_change(idx, 'shear', v))
-                s5.pack(fill=tk.X)
+                self._add_slider_with_entry(
+                    ctrl_frame,
+                    i,
+                    'angle_limit',
+                    "Angle Limit (0..180), sampled in [-limit,+limit]:",
+                    0.0,
+                    180.0,
+                    op['angle_limit'],
+                    is_int=False,
+                )
 
             # Move/Delete buttons
             action_frame = ttk.Frame(frame)
@@ -240,7 +306,7 @@ class AugmentationTuner:
         self.step_var.set(max_step)
         self.update_step_label()
 
-    def on_param_change(self, idx, param, val):
+    def on_param_change(self, idx, param, val, tk_var=None):
         val = float(val)
         if param == 'k':
             # ensure odd integer
@@ -248,10 +314,34 @@ class AugmentationTuner:
             if val % 2 == 0:
                 val += 1
             if val < 1: val = 1
-        if param in ['seed', 'dot_size', 'size']:
+            if val > 41: val = 41
+        if param in ['size']:
             val = int(val)
+        if param == 'size':
+            if val < 10: val = 10
+            if val > 200: val = 200
+        if param == 'mean_limit':
+            if val < 0.0: val = 0.0
+            if val > 0.5: val = 0.5
+        if param == 'var_min':
+            if val < 0.0: val = 0.0
+            if val > 0.5: val = 0.5
+        if param == 'var_max':
+            if val < 0.0: val = 0.0
+            if val > 0.05: val = 0.05
+        if param == 'angle_limit':
+            if val < 0.0: val = 0.0
+            if val > 180.0: val = 180.0
             
         self.sequence[idx][param] = val
+
+        if param in ['var_min', 'var_max']:
+            # Keep interval valid while honoring var_max upper bound.
+            self.sequence[idx]['var_max'] = min(self.sequence[idx]['var_max'], 0.05)
+            self.sequence[idx]['var_min'] = min(self.sequence[idx]['var_min'], self.sequence[idx]['var_max'])
+
+        if tk_var is not None:
+            tk_var.set(int(val) if isinstance(tk_var, tk.IntVar) else float(val))
         self.update_pipeline()
 
     def on_step_change(self, *args):
@@ -264,37 +354,15 @@ class AugmentationTuner:
             self.step_label.config(text="Current Step: 0 (Original)")
         else:
             op = self.sequence[step-1]
-            if op['type'] == 'sp': op_name = 'Salt-Pepper'
-            elif op['type'] == 'mb': op_name = 'Median Blur'
-            elif op['type'] == 'rs': op_name = 'Resize'
-            else: op_name = 'Affine Transform'
+            op_name = self._op_label(op['type'])
             self.step_label.config(text=f"Current Step: {step} ({op_name})")
 
-    def _apply_sp(self, img_pil, amount, ratio, seed, dot_size=1):
-        rng = random.Random(seed)
-        img = np.array(img_pil).copy()
-        h, w, _ = img.shape
-        
-        # Calculate how many dots to place to hit our target total pixels
-        total_pixels = h * w
-        noisy_pixels = max(1, int(total_pixels * amount))
-        num_dots = max(1, int(noisy_pixels / (dot_size * dot_size)))
-
-        num_salt = int(num_dots * ratio)
-        num_pepper = max(0, num_dots - num_salt)
-
-        for _ in range(num_salt):
-            y = rng.randrange(h)
-            x = rng.randrange(w)
-            # Use max/min so we don't index outside the array
-            img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 255
-
-        for _ in range(num_pepper):
-            y = rng.randrange(h)
-            x = rng.randrange(w)
-            img[max(0, y):min(h, y+dot_size), max(0, x):min(w, x+dot_size)] = 0
-
-        return Image.fromarray(img)
+    def _apply_gn(self, img_pil, mean, variance, seed):
+        img = np.array(img_pil).astype(np.float32) / 255.0
+        std = np.sqrt(max(variance, 0.0))
+        noise = np.random.default_rng(seed).normal(loc=mean, scale=std, size=img.shape)
+        noisy = np.clip(img + noise, 0.0, 1.0)
+        return Image.fromarray((noisy * 255.0).astype(np.uint8))
 
     def _apply_mb(self, img_pil, k):
         img = np.array(img_pil)
@@ -309,16 +377,13 @@ class AugmentationTuner:
             antialias=True,
         )
 
-    def _apply_af(self, img_pil, angle, tx, ty, scale, shear):
-        w, h = img_pil.size
-        # TF.affine expects translate as absolute pixels: [tx * w, ty * h]
-        translate = [int(tx * w), int(ty * h)]
+    def _apply_af(self, img_pil, angle):
         return TF.affine(
             img_pil,
             angle=angle,
-            translate=translate,
-            scale=scale,
-            shear=[shear, 0.0],
+            translate=[0, 0],
+            scale=1.0,
+            shear=[0.0, 0.0],
             interpolation=InterpolationMode.BILINEAR,
             fill=0,
         )
@@ -326,8 +391,8 @@ class AugmentationTuner:
     def update_pipeline(self):
         if self.original_image_bgr is None: return
         
-        # Reset RNG seed so noise is deterministic per tune
-        self.rng.seed(42)
+        # Keep deterministic randomness for the same refresh cycle.
+        self.rng.seed(42 + self.refresh_counter)
         
         self.pipeline_images = []
         
@@ -337,14 +402,18 @@ class AugmentationTuner:
         self.pipeline_images.append(current_pil)
         
         for op in self.sequence:
-            if op['type'] == 'sp':
-                current_pil = self._apply_sp(current_pil, op['amount'], op['ratio'], op.get('seed', 42), op.get('dot_size', 2))
+            if op['type'] == 'gn':
+                mean = self.rng.uniform(-op['mean_limit'], op['mean_limit'])
+                variance = self.rng.uniform(op.get('var_min', 0.0), op['var_max'])
+                seed = self.rng.randint(0, 10**9)
+                current_pil = self._apply_gn(current_pil, mean, variance, seed)
             elif op['type'] == 'mb':
                 current_pil = self._apply_mb(current_pil, op['k'])
             elif op['type'] == 'rs':
                 current_pil = self._apply_rs(current_pil, op['size'])
             elif op['type'] == 'af':
-                current_pil = self._apply_af(current_pil, op['angle'], op['tx'], op['ty'], op['scale'], op['shear'])
+                angle = self.rng.uniform(-op['angle_limit'], op['angle_limit'])
+                current_pil = self._apply_af(current_pil, angle)
             self.pipeline_images.append(current_pil)
             
         self.update_image_view()
