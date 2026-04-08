@@ -19,8 +19,43 @@ except Exception:
     LGPIOFactory = None
 
 
+# Pi 5 RP1 hardware PWM-capable GPIO pins.
+PI5_PWM0_CH0_GPIO = 18
+PI5_PWM0_CH1_GPIO = 19
+PI5_PWM1_CH0_GPIO = 12
+PI5_PWM1_CH1_GPIO = 13
+PI5_ALLOWED_PWM_PINS = {
+    PI5_PWM0_CH0_GPIO,
+    PI5_PWM0_CH1_GPIO,
+    PI5_PWM1_CH0_GPIO,
+    PI5_PWM1_CH1_GPIO,
+}
+
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def validate_pi5_pwm_pins(left_pins: "MotorPins", right_pins: "MotorPins") -> None:
+    all_pins = [
+        left_pins.forward_pwm,
+        left_pins.reverse_pwm,
+        right_pins.forward_pwm,
+        right_pins.reverse_pwm,
+    ]
+
+    if len(set(all_pins)) != 4:
+        raise ValueError(
+            "All four PWM pins must be unique. "
+            f"Got: {all_pins}"
+        )
+
+    invalid = [p for p in all_pins if p not in PI5_ALLOWED_PWM_PINS]
+    if invalid:
+        raise ValueError(
+            "Pi 5 hardware PWM pins must be chosen from GPIO 12, 13, 18, 19. "
+            f"Invalid: {invalid}"
+        )
 
 
 def duty_from_voltage(
@@ -193,10 +228,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Pi 5 dual motor PWM controller (4 PWM pins, duty capped at 50%)."
     )
-    parser.add_argument("--left-forward-pin", type=int, required=True)
-    parser.add_argument("--left-reverse-pin", type=int, required=True)
-    parser.add_argument("--right-forward-pin", type=int, required=True)
-    parser.add_argument("--right-reverse-pin", type=int, required=True)
+    parser.add_argument(
+        "--left-forward-pin",
+        type=int,
+        default=PI5_PWM1_CH0_GPIO,
+        help="Default GPIO12 (PWM1_CH0)",
+    )
+    parser.add_argument(
+        "--left-reverse-pin",
+        type=int,
+        default=PI5_PWM1_CH1_GPIO,
+        help="Default GPIO13 (PWM1_CH1)",
+    )
+    parser.add_argument(
+        "--right-forward-pin",
+        type=int,
+        default=PI5_PWM0_CH0_GPIO,
+        help="Default GPIO18 (PWM0_CH0)",
+    )
+    parser.add_argument(
+        "--right-reverse-pin",
+        type=int,
+        default=PI5_PWM0_CH1_GPIO,
+        help="Default GPIO19 (PWM0_CH1)",
+    )
     parser.add_argument("--frequency-hz", type=float, default=1000.0)
     parser.add_argument(
         "--max-duty",
@@ -224,6 +279,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     duty_group_right.add_argument("--right-voltage", type=float)
 
     parser.add_argument("--supply-voltage", type=float, default=12.0)
+    parser.add_argument(
+        "--hold-forever",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="1: keep output until Ctrl+C, 0: use --hold-seconds behavior",
+    )
     parser.add_argument("--hold-seconds", type=float, default=2.0)
     return parser
 
@@ -246,6 +308,7 @@ def main() -> None:
 
     left_pins = MotorPins(args.left_forward_pin, args.left_reverse_pin)
     right_pins = MotorPins(args.right_forward_pin, args.right_reverse_pin)
+    validate_pi5_pwm_pins(left_pins, right_pins)
     safe_max_duty = min(args.max_duty, 0.5)
 
     left_duty = _resolve_duty(
@@ -282,7 +345,15 @@ def main() -> None:
             f"max_duty={safe_max_duty:.3f}"
         )
 
-        if args.hold_seconds > 0:
+        if bool(args.hold_forever):
+            print("Holding output forever. Press Ctrl+C to stop.")
+            try:
+                while True:
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                controller.stop()
+                print("Motors stopped by Ctrl+C.")
+        elif args.hold_seconds > 0:
             time.sleep(args.hold_seconds)
             controller.stop()
             print("Motors stopped.")
