@@ -327,13 +327,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--wasd-duty",
         type=float,
         default=0.3,
-        help="Initial speed in WASD mode (will be clamped to max duty)",
+        help="Initial base speed for differential mode (base +/- diff)",
     )
     parser.add_argument(
         "--wasd-step",
         type=float,
         default=0.05,
-        help="Speed step for + / - in WASD mode",
+        help="Step for base speed (+/-) and steering diff (A/D)",
     )
 
     parser.add_argument("--supply-voltage", type=float, default=12.0)
@@ -368,14 +368,54 @@ def run_wasd_control(
     duty_step: float,
     max_duty: float,
 ) -> None:
-    speed = clamp(initial_duty, 0.0, max_duty)
+    base_speed = clamp(initial_duty, 0.0, max_duty)
+    diff = 0.0
+    motion = 0  # 1: forward, -1: reverse, 0: stop
     step = clamp(duty_step, 0.001, max_duty)
 
     controller.stop()
-    print("WASD mode active.")
-    print("w: forward, s: backward, a: turn left, d: turn right")
-    print("space/x: stop, +/-: speed up/down, q: quit")
-    print(f"speed={speed:.3f}, max_duty={max_duty:.3f}")
+    print("WASD differential mode active.")
+    print("Mixing: left = base - diff, right = base + diff")
+    print("w/s: forward/reverse, a/d: steer left/right")
+    print("+/-: base speed up/down, c: center steering, space/x: stop, q: quit")
+    print(f"base={base_speed:.3f}, diff={diff:.3f}, max_duty={max_duty:.3f}")
+
+    def apply_mix() -> None:
+        nonlocal diff
+
+        if motion == 0 or base_speed <= 0:
+            controller.stop()
+            print(f"stop base={base_speed:.3f} diff={diff:.3f}")
+            return
+
+        # Keep steering diff within the current base-speed envelope.
+        diff = clamp(diff, -base_speed, base_speed)
+
+        left_duty = base_speed - diff
+        right_duty = base_speed + diff
+
+        # Preserve left/right proportion if either side exceeds the safety cap.
+        peak = max(left_duty, right_duty, 1e-9)
+        if peak > max_duty:
+            scale = max_duty / peak
+            left_duty *= scale
+            right_duty *= scale
+
+        direction = 1 if motion > 0 else 0
+        controller.set_both(
+            left_direction=direction,
+            left_duty=left_duty,
+            right_direction=direction,
+            right_duty=right_duty,
+        )
+
+        motion_text = "forward" if motion > 0 else "reverse"
+        turn_text = "left" if diff > 1e-6 else ("right" if diff < -1e-6 else "straight")
+        print(
+            f"{motion_text} turn={turn_text} "
+            f"base={base_speed:.3f} diff={diff:.3f} "
+            f"left={left_duty:.3f} right={right_duty:.3f}"
+        )
 
     try:
         with _raw_stdin_mode():
@@ -386,46 +426,32 @@ def run_wasd_control(
                 k = key.lower()
 
                 if k == "w":
-                    controller.set_both(
-                        left_direction=1,
-                        left_duty=speed,
-                        right_direction=1,
-                        right_duty=speed,
-                    )
-                    print(f"forward speed={speed:.3f}")
+                    motion = 1
+                    apply_mix()
                 elif k == "s":
-                    controller.set_both(
-                        left_direction=0,
-                        left_duty=speed,
-                        right_direction=0,
-                        right_duty=speed,
-                    )
-                    print(f"backward speed={speed:.3f}")
+                    motion = -1
+                    apply_mix()
                 elif k == "a":
-                    controller.set_both(
-                        left_direction=0,
-                        left_duty=speed,
-                        right_direction=1,
-                        right_duty=speed,
-                    )
-                    print(f"turn-left speed={speed:.3f}")
+                    diff = clamp(diff + step, -base_speed, base_speed)
+                    apply_mix()
                 elif k == "d":
-                    controller.set_both(
-                        left_direction=1,
-                        left_duty=speed,
-                        right_direction=0,
-                        right_duty=speed,
-                    )
-                    print(f"turn-right speed={speed:.3f}")
+                    diff = clamp(diff - step, -base_speed, base_speed)
+                    apply_mix()
                 elif k in ("x", " "):
+                    motion = 0
                     controller.stop()
-                    print("stop")
+                    print(f"stop base={base_speed:.3f} diff={diff:.3f}")
+                elif k == "c":
+                    diff = 0.0
+                    apply_mix()
                 elif k in ("+", "="):
-                    speed = clamp(speed + step, 0.0, max_duty)
-                    print(f"speed={speed:.3f}")
+                    base_speed = clamp(base_speed + step, 0.0, max_duty)
+                    diff = clamp(diff, -base_speed, base_speed)
+                    apply_mix()
                 elif k in ("-", "_"):
-                    speed = clamp(speed - step, 0.0, max_duty)
-                    print(f"speed={speed:.3f}")
+                    base_speed = clamp(base_speed - step, 0.0, max_duty)
+                    diff = clamp(diff, -base_speed, base_speed)
+                    apply_mix()
                 elif k == "q":
                     controller.stop()
                     print("quit")
