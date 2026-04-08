@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +37,42 @@ PI5_ALLOWED_PWM_PINS = {
 
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+@contextmanager
+def _raw_stdin_mode():
+    if os.name == "nt":
+        yield
+        return
+
+    try:
+        import termios
+        import tty
+    except Exception:
+        # Fall back to normal stdin if raw mode is unavailable.
+        yield
+        return
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
+def _read_one_key() -> str:
+    if os.name == "nt":
+        import msvcrt
+
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            _ = msvcrt.getwch()
+            return ""
+        return ch
+
+    return sys.stdin.read(1)
 
 
 def validate_pi5_pwm_pins(left_pins: "MotorPins", right_pins: "MotorPins") -> None:
@@ -226,7 +265,13 @@ class DualMotorController:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Pi 5 dual motor PWM controller (4 PWM pins, duty capped at 50%)."
+        description="Pi 5 dual motor PWM controller (single-shot or interactive WASD)."
+    )
+    parser.add_argument(
+        "--control-mode",
+        choices=["single", "wasd"],
+        default="single",
+        help="single: one motor command, wasd: interactive keyboard control",
     )
     parser.add_argument(
         "--left-forward-pin",
@@ -267,16 +312,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="1: force lgpio backend (recommended on Pi 5), 0: auto backend",
     )
 
-    parser.add_argument("--left-dir", type=int, choices=[0, 1], required=True)
-    parser.add_argument("--right-dir", type=int, choices=[0, 1], required=True)
+    parser.add_argument("--left-dir", type=int, choices=[0, 1])
+    parser.add_argument("--right-dir", type=int, choices=[0, 1])
 
-    duty_group_left = parser.add_mutually_exclusive_group(required=True)
+    duty_group_left = parser.add_mutually_exclusive_group(required=False)
     duty_group_left.add_argument("--left-duty", type=float)
     duty_group_left.add_argument("--left-voltage", type=float)
 
-    duty_group_right = parser.add_mutually_exclusive_group(required=True)
+    duty_group_right = parser.add_mutually_exclusive_group(required=False)
     duty_group_right.add_argument("--right-duty", type=float)
     duty_group_right.add_argument("--right-voltage", type=float)
+
+    parser.add_argument(
+        "--wasd-duty",
+        type=float,
+        default=0.3,
+        help="Initial speed in WASD mode (will be clamped to max duty)",
+    )
+    parser.add_argument(
+        "--wasd-step",
+        type=float,
+        default=0.05,
+        help="Speed step for + / - in WASD mode",
+    )
 
     parser.add_argument("--supply-voltage", type=float, default=12.0)
     parser.add_argument(
@@ -284,7 +342,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         choices=[0, 1],
         default=0,
-        help="1: keep output until Ctrl+C, 0: use --hold-seconds behavior",
+        help="single mode only: 1 keep output until Ctrl+C, 0 use --hold-seconds",
     )
     parser.add_argument("--hold-seconds", type=float, default=2.0)
     return parser
@@ -303,6 +361,80 @@ def _resolve_duty(
     raise ValueError("Either duty or voltage must be provided")
 
 
+def run_wasd_control(
+    controller: DualMotorController,
+    *,
+    initial_duty: float,
+    duty_step: float,
+    max_duty: float,
+) -> None:
+    speed = clamp(initial_duty, 0.0, max_duty)
+    step = clamp(duty_step, 0.001, max_duty)
+
+    controller.stop()
+    print("WASD mode active.")
+    print("w: forward, s: backward, a: turn left, d: turn right")
+    print("space/x: stop, +/-: speed up/down, q: quit")
+    print(f"speed={speed:.3f}, max_duty={max_duty:.3f}")
+
+    try:
+        with _raw_stdin_mode():
+            while True:
+                key = _read_one_key()
+                if not key:
+                    continue
+                k = key.lower()
+
+                if k == "w":
+                    controller.set_both(
+                        left_direction=1,
+                        left_duty=speed,
+                        right_direction=1,
+                        right_duty=speed,
+                    )
+                    print(f"forward speed={speed:.3f}")
+                elif k == "s":
+                    controller.set_both(
+                        left_direction=0,
+                        left_duty=speed,
+                        right_direction=0,
+                        right_duty=speed,
+                    )
+                    print(f"backward speed={speed:.3f}")
+                elif k == "a":
+                    controller.set_both(
+                        left_direction=0,
+                        left_duty=speed,
+                        right_direction=1,
+                        right_duty=speed,
+                    )
+                    print(f"turn-left speed={speed:.3f}")
+                elif k == "d":
+                    controller.set_both(
+                        left_direction=1,
+                        left_duty=speed,
+                        right_direction=0,
+                        right_duty=speed,
+                    )
+                    print(f"turn-right speed={speed:.3f}")
+                elif k in ("x", " "):
+                    controller.stop()
+                    print("stop")
+                elif k in ("+", "="):
+                    speed = clamp(speed + step, 0.0, max_duty)
+                    print(f"speed={speed:.3f}")
+                elif k in ("-", "_"):
+                    speed = clamp(speed - step, 0.0, max_duty)
+                    print(f"speed={speed:.3f}")
+                elif k == "q":
+                    controller.stop()
+                    print("quit")
+                    break
+    except KeyboardInterrupt:
+        controller.stop()
+        print("\nMotors stopped by Ctrl+C.")
+
+
 def main() -> None:
     args = _build_arg_parser().parse_args()
 
@@ -311,19 +443,6 @@ def main() -> None:
     validate_pi5_pwm_pins(left_pins, right_pins)
     safe_max_duty = min(args.max_duty, 0.5)
 
-    left_duty = _resolve_duty(
-        duty=args.left_duty,
-        voltage=args.left_voltage,
-        supply_voltage=args.supply_voltage,
-        max_duty=safe_max_duty,
-    )
-    right_duty = _resolve_duty(
-        duty=args.right_duty,
-        voltage=args.right_voltage,
-        supply_voltage=args.supply_voltage,
-        max_duty=safe_max_duty,
-    )
-
     with DualMotorController(
         left_pins,
         right_pins,
@@ -331,6 +450,33 @@ def main() -> None:
         max_duty=safe_max_duty,
         force_lgpio=bool(args.force_lgpio),
     ) as controller:
+        if args.control_mode == "wasd":
+            run_wasd_control(
+                controller,
+                initial_duty=args.wasd_duty,
+                duty_step=args.wasd_step,
+                max_duty=safe_max_duty,
+            )
+            return
+
+        if args.left_dir is None or args.right_dir is None:
+            raise ValueError(
+                "--left-dir and --right-dir are required when --control-mode single"
+            )
+
+        left_duty = _resolve_duty(
+            duty=args.left_duty,
+            voltage=args.left_voltage,
+            supply_voltage=args.supply_voltage,
+            max_duty=safe_max_duty,
+        )
+        right_duty = _resolve_duty(
+            duty=args.right_duty,
+            voltage=args.right_voltage,
+            supply_voltage=args.supply_voltage,
+            max_duty=safe_max_duty,
+        )
+
         controller.set_both(
             left_direction=args.left_dir,
             left_duty=left_duty,
